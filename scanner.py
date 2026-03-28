@@ -454,15 +454,18 @@ def save_paper_trade(signal):
 # ── Resolve paper trades ───────────────────────────────────────────────────
 def resolve_paper_trades():
     try:
-        open_trades = sb.table('pit_paper_trades').select('*').eq('status', 'OPEN').execute()
+        open_trades = sb.table('pit_paper_trades').select('*').eq('status', 'OPEN').eq('notified', False).execute()
         if not open_trades.data:
             return
         print(f'Checking {len(open_trades.data)} open paper trades...')
+        today = now_utc().strftime('%Y-%m-%d')
         for trade in open_trades.data:
             if not trade.get('condition_id'):
                 continue
+            res_date = trade.get('resolution_date', '')
+            if not res_date or res_date > today:
+                continue
             try:
-                # Use slug-based endpoint which is more reliable
                 r = session.get(
                     f'{GAMMA_API}/markets',
                     params={'conditionIds': trade['condition_id']},
@@ -474,10 +477,6 @@ def resolve_paper_trades():
                     continue
                 market = markets[0]
 
-                if not (market.get('closed') or market.get('resolved')):
-                    continue
-
-                # Get outcome from resolved market
                 outcomes = market.get('outcomes') or ['YES', 'NO']
                 prices = market.get('outcomePrices') or []
                 price_map = {}
@@ -488,7 +487,6 @@ def resolve_paper_trades():
                         except:
                             pass
 
-                # Winning outcome has price close to 1.0
                 outcome = None
                 for o, p in price_map.items():
                     if p > 0.95:
@@ -496,37 +494,30 @@ def resolve_paper_trades():
                         break
 
                 if not outcome:
-                    print(f'Could not determine outcome for {trade["market_question"][:50]}')
                     continue
 
                 won = outcome == trade['direction']
                 pnl = round(trade['stake'] * (100 / trade['market_odds'] - 1), 2) if won else -float(trade['stake'])
-                lesson = extract_lesson(trade, outcome, won)
+                result = 'WON ✅' if won else 'LOST ❌'
 
                 sb.table('pit_paper_trades').update({
-                    'status': 'CLOSED',
                     'outcome': outcome,
                     'pnl': pnl,
-                    'lesson': lesson,
-                    'resolved_at': now_utc_iso()
+                    'notified': True,
+                    'status': 'PENDING_RESOLVE'
                 }).eq('id', trade['id']).execute()
 
-                if lesson:
-                    sb.table('pit_lessons').insert({
-                        'lesson': lesson,
-                        'lesson_type': 'auto',
-                        'source': f'Paper trade: {trade["market_question"][:50]}'
-                    }).execute()
-
-                result = 'WON ✅' if won else 'LOST ❌'
                 send_telegram(
                     f'📊 *PAPER TRADE RESOLVED*\n\n'
-                    f'*{trade["market_question"][:80]}*\n'
-                    f'{trade["direction"]} → Resolved {outcome} | {result}\n'
-                    f'P&L: ${pnl:+.2f}\n\n'
-                    f'💡 *Lesson:*\n_{lesson[:200] if lesson else "None"}_'
+                    f'*{trade["market_question"][:80]}*\n\n'
+                    f'Your call: *{trade["direction"]}* @ {trade["market_odds"]}%\n'
+                    f'Resolved: *{outcome}* | {result}\n'
+                    f'Paper P&L: ${pnl:+.2f}\n\n'
+                    f'Thesis: _{trade.get("thesis", "")[:150]}_\n\n'
+                    f'Reply *Y* to extract lesson + save to knowledge base\n'
+                    f'Reply *N* to skip'
                 )
-                print(f'Resolved: {trade["market_question"][:50]} → {outcome} | {result}')
+                print(f'Notified: {trade["market_question"][:50]} → {outcome} | {result}')
 
             except Exception as e:
                 print(f'Resolution error trade {trade.get("id")}: {e}')
