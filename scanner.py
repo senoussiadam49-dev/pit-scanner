@@ -7,6 +7,7 @@ import anthropic
 from supabase import create_client
 from datetime import datetime, timedelta
 import json
+import re
 
 # ── Config ────────────────────────────────────────────────────────────────
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
@@ -51,7 +52,6 @@ def get_active_markets():
 # ── Fetch RSS news ─────────────────────────────────────────────────────────
 def get_recent_news():
     headlines = []
-    cutoff = datetime.utcnow() - timedelta(hours=6)
     for source, url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
@@ -59,7 +59,7 @@ def get_recent_news():
                 headlines.append({
                     'source': source,
                     'title': entry.get('title', ''),
-                    'summary': entry.get('summary', '')[:200],
+                    'summary': entry.get('summary', '')[:300],
                     'link': entry.get('link', ''),
                 })
         except Exception as e:
@@ -73,14 +73,16 @@ def get_knowledge_context():
         lessons = sb.table('pit_lessons').select('*').order('created_at', desc=True).limit(20).execute()
         lines = []
         if knowledge.data:
-            lines.append('=== KNOWLEDGE BASE ===')
+            lines.append('=== KNOWLEDGE BASE (apply before every analysis) ===')
             for k in knowledge.data:
                 lines.append(f'[{k["category"].upper()}] {k["title"]}: {k["content"][:500]}')
         if lessons.data:
-            lines.append('=== LESSONS LEARNED ===')
+            lines.append('=== LESSONS LEARNED (apply to every bet decision) ===')
             for l in lessons.data:
                 tag = f'[{l["market_type"].upper()}] ' if l.get('market_type') else ''
                 lines.append(f'{tag}{l["lesson"]}')
+        if lines:
+            lines.append('=== END KNOWLEDGE ===')
         return '\n'.join(lines)
     except Exception as e:
         print(f'Knowledge error: {e}')
@@ -89,13 +91,16 @@ def get_knowledge_context():
 # ── Send Telegram ──────────────────────────────────────────────────────────
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
+        print('No Telegram config')
         return
     try:
-        requests.post(
+        r = requests.post(
             f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
             json={'chat_id': TG_CHAT, 'text': msg, 'parse_mode': 'Markdown'},
             timeout=10
         )
+        if not r.ok:
+            print(f'Telegram error: {r.text}')
     except Exception as e:
         print(f'Telegram error: {e}')
 
@@ -119,7 +124,7 @@ def save_paper_trade(signal):
     except Exception as e:
         print(f'Paper trade save error: {e}')
 
-# ── Save signal to pit_signals ─────────────────────────────────────────────
+# ── Save signal ────────────────────────────────────────────────────────────
 def save_signal(signal):
     try:
         sb.table('pit_signals').insert({
@@ -152,36 +157,36 @@ def resolve_paper_trades():
                 r = requests.get(f'{GAMMA_API}/markets/{trade["condition_id"]}', timeout=10)
                 market = r.json()
                 if market.get('closed') or market.get('resolved'):
-                    outcome = 'YES' if market.get('outcomePrices', [0])[0] > 0.99 else 'NO'
+                    outcome = 'YES' if float((market.get('outcomePrices') or ['0'])[0]) > 0.99 else 'NO'
                     won = outcome == trade['direction']
-                    pnl = round(trade['stake'] * (1 / (trade['market_odds'] / 100) - 1), 2) if won else -trade['stake']
-
-                    # Auto-extract lesson via Claude
+                    pnl = round(trade['stake'] * (100 / trade['market_odds'] - 1), 2) if won else -trade['stake']
                     lesson = extract_lesson(trade, outcome, won)
-
                     sb.table('pit_paper_trades').update({
                         'status': 'CLOSED',
                         'outcome': outcome,
                         'pnl': pnl,
                         'lesson': lesson,
-                        'resolved_at': datetime.utcnow().isoformat()
+                        'resolved_at': datetime.now(datetime.UTC).isoformat()
                     }).eq('id', trade['id']).execute()
-
-                    # Save lesson permanently
                     if lesson:
                         sb.table('pit_lessons').insert({
                             'lesson': lesson,
                             'lesson_type': 'auto',
-                            'source': f'Paper trade resolution: {trade["market_question"][:50]}'
+                            'source': f'Paper trade: {trade["market_question"][:50]}'
                         }).execute()
-
-                    result = 'WON' if won else 'LOST'
-                    send_telegram(f'📊 *PAPER TRADE RESOLVED*\n{trade["market_question"][:70]}\n{trade["direction"]} → {outcome} | {result} | P&L: ${pnl}\n\n💡 {lesson[:100] if lesson else ""}')
-                    print(f'Resolved: {trade["market_question"][:60]} → {outcome}')
+                    result = 'WON ✅' if won else 'LOST ❌'
+                    send_telegram(
+                        f'📊 *PAPER TRADE RESOLVED*\n\n'
+                        f'*{trade["market_question"][:80]}*\n'
+                        f'{trade["direction"]} → Resolved {outcome} | {result}\n'
+                        f'P&L: ${pnl:+.2f}\n\n'
+                        f'💡 *Lesson learned:*\n_{lesson[:200] if lesson else "None extracted"}_'
+                    )
+                    print(f'Resolved: {trade["market_question"][:60]} → {outcome} | {result}')
             except Exception as e:
-                print(f'Resolution error for {trade.get("id")}: {e}')
+                print(f'Resolution error {trade.get("id")}: {e}')
     except Exception as e:
-        print(f'Resolve paper trades error: {e}')
+        print(f'Resolve error: {e}')
 
 def extract_lesson(trade, outcome, won):
     try:
@@ -208,9 +213,40 @@ Return ONLY the lesson text, nothing else.'''
     except:
         return ''
 
+# ── Build rich Telegram alert ──────────────────────────────────────────────
+def build_alert(signal, news_items):
+    # Find the news item that triggered this signal
+    triggering_news = ''
+    for n in news_items:
+        title_lower = n['title'].lower()
+        question_lower = signal.get('question', '').lower()
+        keywords = [w for w in question_lower.split() if len(w) > 4]
+        if any(k in title_lower for k in keywords[:3]):
+            triggering_news = f'[{n["source"]}] {n["title"]}'
+            break
+
+    market_url = f'https://polymarket.com/event/{signal.get("conditionId", "")}'
+
+    alert = (
+        f'⚡ *PIT AUTO-BET PENDING*\n\n'
+        f'*{signal["question"][:100]}*\n\n'
+        f'*Direction:* {signal["direction"]} @ {signal["marketOdds"]}%\n'
+        f'*True P:* {signal["trueP"]}% | *Edge:* +{signal["edgePp"]}pp\n'
+        f'*Conviction:* {signal["conviction"]}/10 | *RR:* {signal["resolutionRisk"]}/5\n'
+        f'*Resolves:* {signal.get("resolutionDate", "?")}\n\n'
+        f'📰 *Why NOW:*\n_{triggering_news or "Multiple signals converging"}_\n\n'
+        f'🎯 *Edge:* _{signal.get("thesis", "")}_\n\n'
+        f'⚠️ *Bear case:* _{signal.get("bearCase", "Not specified")}_\n\n'
+        f'📋 *Resolution criteria:* _{signal.get("resolutionCriteria", "Check Polymarket")}_\n\n'
+        f'🔗 {market_url}\n\n'
+        f'Reply *Y* to place $25 | *N* to skip\n'
+        f'⏳ 5 minute window'
+    )
+    return alert
+
 # ── Main scan ──────────────────────────────────────────────────────────────
 def run_scan():
-    print(f'\n=== PIT SCAN {datetime.utcnow().strftime("%Y-%m-%d %H:%M")} ===')
+    print(f'\n=== PIT SCAN {datetime.now().strftime("%Y-%m-%d %H:%M")} ===')
 
     markets = get_active_markets()
     news = get_recent_news()
@@ -220,49 +256,55 @@ def run_scan():
         print('No markets fetched')
         return
 
-    # Build market summary
+    print(f'Markets: {len(markets)} | News: {len(news)} | Knowledge: {len(knowledge)} chars')
+
     market_summary = '\n'.join([
-        f'- "{m.get("question", "")}" | YES: {m.get("outcomePrices", ["?"])[0]} | Vol: ${int(float(m.get("volume", 0))):,} | Ends: {m.get("endDate", "?")[:10]} | ID: {m.get("conditionId", "")}'
+        f'- "{m.get("question", "")}" | YES: {(m.get("outcomePrices") or ["?"])[0]} | Vol: ${int(float(m.get("volume") or 0)):,} | Ends: {str(m.get("endDate", "?"))[:10]} | ID: {m.get("conditionId", "")}'
         for m in markets[:50]
     ])
 
-    # Build news summary
     news_summary = '\n'.join([
-        f'[{n["source"]}] {n["title"]}'
+        f'[{n["source"]}] {n["title"]} — {n["summary"][:150]}'
         for n in news[:30]
     ])
 
     prompt = f'''{knowledge}
 
-You are a Polymarket intelligence scanner. Analyse the news and markets below.
+You are a Polymarket intelligence scanner with deep knowledge of prediction market edges.
 
-Find opportunities where:
-1. Breaking news hasn't been priced into Polymarket odds yet (slow update edge)
-2. Second-order consequences of events that most bettors haven't connected yet
-3. Markets resolving in 24-48h where you have high confidence
-
-ACTIVE POLYMARKET MARKETS (sorted by volume):
+ACTIVE POLYMARKET MARKETS (by volume):
 {market_summary}
 
 BREAKING NEWS (last 6 hours):
 {news_summary}
 
-For each opportunity found, return JSON inside <signals> tags:
+Apply the knowledge base and lessons above before making any decisions.
+
+Find opportunities where breaking news has NOT yet been priced into Polymarket odds.
+Focus on:
+1. Slow update edge — news broke <6h ago, odds unchanged
+2. Second-order consequences — downstream effects not yet connected
+3. Markets resolving in 24-72h with clear edge
+
+For each opportunity, return JSON inside <signals> tags:
 <signals>
 [
   {{
-    "question": "exact market question",
-    "conditionId": "condition id from market list",
-    "tokenId": "first token id if available",
+    "question": "exact market question from the list above",
+    "conditionId": "condition id",
+    "tokenId": "",
     "direction": "YES or NO",
-    "marketOdds": 45,
-    "trueP": 62,
-    "edgePp": 17,
+    "marketOdds": 65,
+    "trueP": 25,
+    "edgePp": 40,
     "conviction": 8,
     "resolutionRisk": 2,
-    "edgeType": "slow_update or second_order or info_lag",
-    "resolutionDate": "YYYY-MM-DD",
-    "thesis": "one sentence explaining the edge",
+    "edgeType": "slow_update",
+    "resolutionDate": "2026-03-31",
+    "thesis": "one sentence: what the market is getting wrong and why",
+    "bearCase": "one sentence: what would prove this wrong",
+    "resolutionCriteria": "how does this market actually resolve — exact criteria",
+    "newsSource": "which RSS source triggered this",
     "betType": "real or paper"
   }}
 ]
@@ -270,12 +312,13 @@ For each opportunity found, return JSON inside <signals> tags:
 
 Rules:
 - conviction 1-10, only include >= 6
-- resolutionRisk 1-5, exclude >= 4
-- betType "real" only if conviction >= 8 AND resolutionRisk <= 2 AND edge >= 7pp
+- resolutionRisk 1-5, exclude >= 4  
+- betType "real" ONLY if conviction >= 8 AND resolutionRisk <= 2 AND edgePp >= 7
 - betType "paper" if conviction 6-7 OR resolutionRisk = 3
 - Exclude elections, Fed decisions, slow political markets
-- Max 8 signals
-- If no genuine edge found, return <signals>[]</signals>'''
+- Apply all lessons from knowledge base before deciding
+- Max 6 signals
+- If no genuine edge: return <signals>[]</signals>'''
 
     try:
         msg = claude.messages.create(
@@ -284,8 +327,6 @@ Rules:
             messages=[{'role': 'user', 'content': prompt}]
         )
         response = msg.content[0].text
-
-        import re
         match = re.search(r'<signals>(.*?)</signals>', response, re.DOTALL)
         if not match:
             print('No signals found')
@@ -294,45 +335,40 @@ Rules:
         signals = json.loads(match.group(1).strip())
         print(f'Found {len(signals)} signals')
 
+        real_count = 0
+        paper_count = 0
+
         for signal in signals:
             save_signal(signal)
 
             if signal.get('betType') == 'real':
-                # Send Telegram alert with Y/N
-                msg_text = (
-                    f'⚡ *PIT AUTO-BET PENDING*\n\n'
-                    f'*{signal["question"][:80]}*\n\n'
-                    f'{signal["direction"]} @ {signal["marketOdds"]}% | '
-                    f'Your P: {signal["trueP"]}% | '
-                    f'Edge: +{signal["edgePp"]}pp\n'
-                    f'Conviction: {signal["conviction"]}/10 | RR: {signal["resolutionRisk"]}\n'
-                    f'Resolves: {signal.get("resolutionDate", "?")}\n\n'
-                    f'_{signal["thesis"]}_\n\n'
-                    f'Reply *Y* to place $25 | *N* to skip\n'
-                    f'⏳ 5 minute window'
-                )
-                send_telegram(msg_text)
-
-                # Save to pit_signals as unprocessed
-                sb.table('pit_signals').update({'processed': False}).eq(
-                    'market_question', signal['question']
-                ).execute()
+                real_count += 1
+                alert = build_alert(signal, news)
+                send_telegram(alert)
+                print(f'REAL BET ALERT: {signal["question"][:60]}')
 
             elif signal.get('betType') == 'paper':
+                paper_count += 1
                 save_paper_trade(signal)
                 print(f'Paper trade: {signal["question"][:60]}')
 
+        print(f'Scan complete — {real_count} real alerts, {paper_count} paper trades')
+
+        if real_count == 0 and paper_count == 0:
+            print('No qualifying signals this scan')
+
+    except json.JSONDecodeError as e:
+        print(f'JSON parse error: {e}')
     except Exception as e:
         print(f'Scan error: {e}')
 
-    # Also resolve any open paper trades
     resolve_paper_trades()
 
 # ── Schedule ───────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print('PIT Scanner starting...')
-    send_telegram('🟢 *PIT Scanner started* — scanning every 30 min')
-    run_scan()  # Run immediately on start
+    send_telegram('🟢 *PIT Scanner started* — scanning every 30 min\nSources: Reuters, AP, BBC, Al Jazeera, Middle East Eye, Defense One, TechCrunch, The Verge + Polymarket live odds')
+    run_scan()
     schedule.every(30).minutes.do(run_scan)
     while True:
         schedule.run_pending()
