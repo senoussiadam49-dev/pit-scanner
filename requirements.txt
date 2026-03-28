@@ -1,0 +1,8 @@
+anthropic
+supabase
+feedparser
+requests
+schedule
+python-dotenv
+eth-account
+web3
