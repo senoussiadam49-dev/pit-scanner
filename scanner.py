@@ -763,31 +763,89 @@ def scanner_b_score_batch(markets_batch, knowledge):
             f'YES odds: {m["yes_pct"]}% | Volume: ${int(m["volume"]):,} | Resolves: {m["endDate"]}\n\n'
         )
 
+    MASTER_PROMPT = """You are PIT Scanner — a prediction market analyst finding markets where the crowd is provably wrong for a structural reason.
+
+CORE DOCTRINE:
+- Default is PASS unless every gate clears
+- Resolution risk evaluated BEFORE probability
+- State edge in ONE sentence, falsifiably
+- Do NOT fabricate edges — use web search to verify current reality
+- Net edge after fees must be positive
+- Surface candidates generously, score honestly
+
+THREE GATES (all must be YES):
+G1: Permitted market type?
+G2: Edge named in one sentence, falsifiably?
+G3: Resolution risk ≤3 after reading actual rules?
+
+PERMITTED TYPES:
+A) Geopolitical breaking news — slow update edge, fee-FREE
+B) Second-order geopolitical — downstream consequence not yet priced, fee-FREE  
+C) Tech/AI corporate events — domain knowledge edge, fees apply
+D) Scientific/regulatory milestones — base rate anchoring edge
+E) Corporate binary events — domain knowledge or info lag
+
+HARD PASS (no analysis needed):
+- Elections, Fed decisions, sports, esports, entertainment awards
+- Earnings surprise markets
+- Any market with RR ≥4
+- Any market where you cannot name a structural reason the price is wrong
+
+FOUR EDGES:
+1. SLOW UPDATE: Market hasn't processed news from last 30-90 min. Requires timestamp + evidence of no reprice. Kill if already moved >5pp.
+2. SECOND-ORDER LAG: Primary event priced, downstream market not connected. Requires causal chain + structural reason crowd missed it.
+3. BASE RATE ANCHORING: Market stuck on prior. Requires reference class + explicit evidence-based adjustment.
+4. RESOLUTION TECHNICALITY: Crowd prices what happened, you know what the rules say. Requires exact rule quote.
+
+RESOLUTION RISK:
+RR1: Objective trigger, named source, no interpretation
+RR2: Named sources, small edge cases
+RR3: One technicality, proceed carefully
+RR4/5: PASS automatically
+
+PROBABILITY FRAMEWORK (never skip):
+A) Base rate with source
+B) Evidence table: each fact, direction, adjustment in pp
+C) Scenarios: bull/base/bear summing to 100%
+D) Point estimate P(YES) ± confidence interval
+E) Calibration haircut: subtract 10-15pp — NEVER claim >15pp edge without extraordinary evidence
+F) Net edge = P(YES)_true − P(YES)_market (geopolitics: fees=0, others subtract ~0.5-1pp)
+
+BET CLASSIFICATION:
+REAL BET: net edge ≥7pp AND RR≤2 AND conviction≥8
+PAPER TRADE: net edge ≥3pp AND RR≤3 AND conviction 6-7
+PASS: anything else
+
+CRITICAL — MANDATORY WEB SEARCH:
+Before scoring ANY market you MUST search for:
+1. Current news on this market topic (last 48 hours)
+2. Any recent developments affecting probability
+3. Current Polymarket odds to verify prices are accurate
+4. Metaculus base rates if available
+
+DO NOT estimate probability from training knowledge alone.
+DO NOT flag an edge unless web search confirms a specific recent development.
+If web search finds nothing relevant — market is likely correctly priced — PASS it.
+
+SYSTEMATIC BIASES TO EXPLOIT:
+- Recency bias: fade overreactions after escalations/de-escalations
+- Narrative anchoring: historical base rates beat "X never backs down" stories
+- Resolution criteria blindness: crowd bets on what happens, you bet on what the rules say
+- Fee blindness: geopolitics is fee-free, everything else has costs — exploit this
+
+MACRO CONTEXT MARCH 2026:
+- Hormuz crisis active: US-Israel strikes on Iran, strait closed, Qatar LNG offline, ceasefire talks via Oman
+- Geopolitical markets are fee-FREE — primary hunting ground
+- Agentic AI: OpenClaw fastest-growing open source project, compute demand 1000x+
+- Petrodollar stress: Saudi ended dollar pricing, CIPS $245T yuan, gold beneficiary
+- Fee regime: from March 30 only geopolitics/world events remain fee-free"""
+
     prompt = (
+        f'{MASTER_PROMPT}\n\n'
         f'{knowledge}\n\n'
-        f'You are a prediction market analyst with deep knowledge of world events, geopolitics, technology, science, regulation, and business.\n\n'
-        f'Below are {len(markets_batch)} active Polymarket markets. For each one, assess whether the current odds are WRONG based on your knowledge.\n\n'
-        f'PERMITTED MARKET TYPES for Scanner B:\n'
-        f'- Geopolitical outcomes (ceasefires, sanctions, diplomatic events, military actions)\n'
-        f'- Tech & AI corporate events (product launches, regulatory decisions, company milestones)\n'
-        f'- Scientific milestones (drug approvals, space missions, research breakthroughs)\n'
-        f'- Regulatory & legal decisions (court rulings, antitrust, government approvals)\n'
-        f'- Corporate & business events (CEO changes, mergers, earnings, product launches)\n'
-        f'- Energy & commodity policy (OPEC decisions, pipeline policy, energy security)\n'
-        f'- Second-order consequences of major events\n\n'
-        f'STRICTLY EXCLUDED — return nothing for these:\n'
-        f'- Elections and political referendums\n'
-        f'- Federal Reserve interest rate decisions\n'
-        f'- Sports and esports outcomes\n'
-        f'- Entertainment awards\n\n'
-        f'MARKETS TO ASSESS:\n{market_text}\n\n'
-        f'Apply ALL knowledge base lessons before deciding.\n'
-        f'For each market where you identify a genuine mispricing:\n'
-        f'- You must have a SPECIFIC reason the price is wrong (not just a general thesis)\n'
-        f'- The edge must be based on something the average bettor is likely missing\n'
-        f'- Resolution risk must be ≤ 3 (clear, verifiable outcome)\n'
-        f'- Conviction must be ≥ 6\n\n'
-        f'If no genuine mispricing exists in this batch, return an empty array.\n\n'
+        f'You have web search. USE IT NOW before scoring any market.\n\n'
+        f'MARKETS TO ASSESS ({len(markets_batch)} markets):\n{market_text}\n\n'
+        f'Search for current news and developments on EACH market before scoring.\n'
         f'Return JSON inside <signals> tags:\n'
         f'<signals>\n'
         f'[\n'
@@ -801,33 +859,40 @@ def scanner_b_score_batch(markets_batch, knowledge):
         f'    "edgePp": 17,\n'
         f'    "conviction": 7,\n'
         f'    "resolutionRisk": 2,\n'
-        f'    "edgeType": "base_rate_anchor or second_order or info_lag or stale_odds",\n'
+        f'    "edgeType": "slow_update|second_order|base_rate|resolution_technicality",\n'
         f'    "resolutionDate": "YYYY-MM-DD",\n'
         f'    "thesis": "one specific sentence: exactly what the market is getting wrong and why",\n'
-        f'    "bearCase": "one sentence: what would prove this wrong",\n'
-        f'    "resolutionCriteria": "how this market resolves",\n'
-        f'    "newsSource": "",\n'
+        f'    "bearCase": "one sentence: what proves this wrong",\n'
+        f'    "resolutionCriteria": "exact resolution criteria from the market rules",\n'
+        f'    "newsSource": "what web search found that supports this edge",\n'
         f'    "betType": "real or paper"\n'
         f'  }}\n'
         f']\n'
         f'</signals>\n\n'
         f'Rules:\n'
-        f'- Only include markets with a SPECIFIC mispricing reason — not vague theses\n'
-        f'- conviction 1-10, only include >= 6\n'
-        f'- resolutionRisk 1-5, exclude >= 4\n'
-        f'- betType real ONLY if conviction >= 8 AND resolutionRisk <= 2 AND edgePp >= 7\n'
+        f'- Only include markets with a SPECIFIC mispricing reason confirmed by web search\n'
+        f'- conviction 1-10, only include ≥6\n'
+        f'- resolutionRisk 1-5, exclude ≥4\n'
+        f'- betType real ONLY if conviction ≥8 AND resolutionRisk ≤2 AND edgePp ≥7\n'
         f'- betType paper if conviction 6-7 OR resolutionRisk = 3\n'
-        f'- Quality over quantity — 0 signals is correct if nothing is genuinely mispriced\n'
+        f'- NEVER claim edgePp >15 — if you think it is that large, recheck\n'
+        f'- NEVER assign conviction ≥8 without a specific web search finding\n'
+        f'- 0 signals is correct if nothing is genuinely mispriced\n'
         f'- If no genuine mispricing: return <signals>[]</signals>'
     )
+    
 
     try:
         msg = claude.messages.create(
             model='claude-sonnet-4-20250514',
-            max_tokens=3000,
+            max_tokens=4000,
+            tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
             messages=[{'role': 'user', 'content': prompt}]
         )
-        response = msg.content[0].text
+        response = ''
+        for block in msg.content:
+            if hasattr(block, 'type') and block.type == 'text':
+                response += block.text
         match = re.search(r'<signals>(.*?)</signals>', response, re.DOTALL)
         if not match:
             return []
