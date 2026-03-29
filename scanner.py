@@ -421,7 +421,7 @@ def save_signal(signal):
             'conviction': signal.get('conviction'),
             'resolution_risk': signal.get('resolutionRisk'),
             'edge_type': signal.get('edgeType'),
-            'resolution_date': signal.get('resolutionDate'),
+            'resolution_date': signal.get('resolutionDate') or None,
             'thesis': signal.get('thesis'),
         }).execute()
     except Exception as e:
@@ -739,9 +739,11 @@ def get_scanner_b_markets(all_markets):
             continue
         if m['volume'] < 10000:
             continue
-        if m['endDate'] and m['endDate'] > cutoff:
+        if not m['endDate'] or m['endDate'] < today:
             continue
-        if m['endDate'] and m['endDate'] < today:
+        if m['endDate'] > cutoff:
+            continue
+        if m.get('resolved') or m.get('closed'):
             continue
         # Skip if already have open paper trade
         if paper_trade_already_exists(m['conditionId'], 'YES') or paper_trade_already_exists(m['conditionId'], 'NO'):
