@@ -497,6 +497,35 @@ def process_signals(raw_signals, markets_by_id, news_items=None, source='A'):
     return real_count, paper_count
 
 # ── Resolve paper trades ───────────────────────────────────────────────────
+def generate_resolution_questions(trade, outcome, won):
+    try:
+        msg = claude.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=400,
+            messages=[{
+                'role': 'user',
+                'content': (
+                    f'A prediction market paper trade just resolved. Generate 3 SPECIFIC questions '
+                    f'to ask the trader to extract maximum learning value. Be specific to THIS trade.\n\n'
+                    f'Market: "{trade["market_question"]}"\n'
+                    f'Direction: {trade["direction"]} @ {trade["market_odds"]}%\n'
+                    f'True P estimate: {trade["true_p"]}%\n'
+                    f'Edge claimed: {trade["edge_pp"]}pp\n'
+                    f'Thesis: {trade.get("thesis", "")}\n'
+                    f'Outcome: {outcome} | {"WON" if won else "LOST"}\n\n'
+                    f'Questions should cover:\n'
+                    f'- What specifically triggered the resolution\n'
+                    f'- Whether the thesis reasoning held or broke\n'
+                    f'- Any resolution criteria technicality\n\n'
+                    f'Return ONLY 3 numbered questions, one per line.'
+                )
+            }]
+        )
+        return msg.content[0].text.strip()
+    except:
+        return '1. What actually happened that triggered resolution?\n2. Did your thesis reasoning hold or break?\n3. Was there any resolution criteria technicality?'
+
+
 def resolve_paper_trades():
     try:
         open_trades = sb.table('pit_paper_trades').select('*').eq('status', 'OPEN').eq('notified', False).execute()
@@ -545,6 +574,8 @@ def resolve_paper_trades():
                 pnl = round(trade['stake'] * (100 / trade['market_odds'] - 1), 2) if won else -float(trade['stake'])
                 result = 'WON ✅' if won else 'LOST ❌'
 
+                questions = generate_resolution_questions(trade, outcome, won)
+
                 sb.table('pit_paper_trades').update({
                     'outcome': outcome,
                     'pnl': pnl,
@@ -552,20 +583,20 @@ def resolve_paper_trades():
                     'status': 'PENDING_RESOLVE'
                 }).eq('id', trade['id']).execute()
 
-                market_url = f'https://polymarket.com/event/{trade["condition_id"]}'
+                market_url = f'https://polymarket.com/search?q={requests.utils.quote(trade["market_question"][:60])}'
                 send_telegram(
                     f'📊 *PAPER TRADE RESOLVED*\n\n'
                     f'*{trade["market_question"][:80]}*\n\n'
                     f'Your call: *{trade["direction"]}* @ {trade["market_odds"]}%\n'
                     f'Resolved: *{outcome}* | {result}\n'
                     f'Paper P&L: ${pnl:+.2f}\n\n'
-                    f'Original thesis: _{trade.get("thesis", "")[:120]}_\n\n'
+                    f'Your thesis was: _{trade.get("thesis", "")[:150]}_\n\n'
                     f'🔗 {market_url}\n\n'
-                    f'*To save a rich lesson:*\n'
-                    f'Go to the market link → copy resolution text → paste it here\n\n'
-                    f'*Or just reply:*\n'
-                    f'*Y* — confirm, basic lesson extracted\n'
-                    f'*N* — skip, keep open for manual review'
+                    f'━━━━━━━━━━━━━━━━━━\n'
+                    f'*Reply with answers to:*\n\n'
+                    f'{questions}\n\n'
+                    f'More detail = better lesson saved to KB.\n'
+                    f'Reply *Y* for basic lesson | *N* to skip'
                 )
                 print(f'Notified: {trade["market_question"][:50]} → {outcome} | {result}')
 
