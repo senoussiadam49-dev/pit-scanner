@@ -387,7 +387,7 @@ def build_alert(signal, news_items=None, source='A'):
                 triggering_news = f'[{n["source"]}] {n["title"]}'
                 break
 
-    market_url = f'https://polymarket.com/event/{signal.get("conditionId", "")}'
+    market_url = f'https://polymarket.com/search?q={requests.utils.quote(signal.get("question", "")[:60])}'
     scanner_tag = '📡 Scanner B — Market Mispricing' if source == 'B' else '📰 Scanner A — News Signal'
 
     return (
