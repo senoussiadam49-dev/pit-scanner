@@ -944,7 +944,7 @@ def run_market_scan():
 
         # Process in batches of 20
         all_signals = []
-        batch_size = 20
+        batch_size = 10
         for i in range(0, min(len(eligible), 100), batch_size):
             batch = eligible[i:i + batch_size]
             print(f'Scanner B: Batch {i//batch_size + 1} ({len(batch)} markets)...')
@@ -952,7 +952,7 @@ def run_market_scan():
             if signals:
                 all_signals.extend(signals)
                 print(f'Scanner B: Found {len(signals)} signals in batch')
-            time.sleep(2)  # Rate limiting between batches
+            time.sleep(15)  # Rate limiting between batches
 
         if not all_signals:
             print('Scanner B: No mispricings found this scan')
