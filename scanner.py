@@ -1187,13 +1187,10 @@ if __name__ == '__main__':
         '✓ Auto paper trade resolution alerts\n\n'
         'Scanning every 30 min 24/7'
     )
-    # Run both scanners on startup
-    run_scan()
+    # Scanner B only — Scanner A disabled to reduce API costs
     run_market_scan()
 
-    # Scanner A every 30 min, Scanner B every 60 min (heavier)
-    schedule.every(30).minutes.do(run_scan)
-    schedule.every(60).minutes.do(run_market_scan)
+    schedule.every(30).minutes.do(run_market_scan)
 
     while True:
         schedule.run_pending()
