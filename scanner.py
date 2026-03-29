@@ -692,10 +692,14 @@ def stage2_score(shortlisted_ids, clusters, knowledge, news):
     try:
         msg = claude.messages.create(
             model='claude-sonnet-4-20250514',
-            max_tokens=2000,
+            max_tokens=3000,
+            tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
             messages=[{'role': 'user', 'content': prompt}]
         )
-        response = msg.content[0].text
+        response = ''
+        for block in msg.content:
+            if hasattr(block, 'type') and block.type == 'text':
+                response += block.text
         match = re.search(r'<signals>(.*?)</signals>', response, re.DOTALL)
         if not match:
             print('No signals in stage 2')
