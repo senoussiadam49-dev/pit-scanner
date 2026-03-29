@@ -263,7 +263,7 @@ def get_sis_signals():
         return ''
     try:
         sis_sb = create_client(SIS_SUPABASE_URL, SIS_SUPABASE_KEY)
-        signals = sis_sb.table('signals').select('*').eq('signal_strength', 'HIGH').eq('processed', False).order('created_at', desc=True).limit(5).execute()
+        signals = sis_sb.table('signals').select('*').eq('signal_strength', 'HIGH').order('created_at', desc=True).limit(5).execute()
         if not signals.data:
             return ''
         lines = ['=== SIS HIGH SIGNALS ===']
