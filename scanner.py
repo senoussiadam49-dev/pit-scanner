@@ -93,6 +93,12 @@ def get_active_markets(limit=100):
 
         clean = []
         for m in markets:
+            # Temp debug — remove after fixing
+            if len(clean) == 0:
+                print(f'RAW MARKET FIELDS: {list(m.keys())}')
+                print(f'RAW outcomePrices: {m.get("outcomePrices")}')
+                print(f'RAW lastTradePrice: {m.get("lastTradePrice")}')
+                print(f'RAW bestAsk: {m.get("bestAsk")}')
             try:
                 prices = m.get('outcomePrices') or []
                 outcomes = m.get('outcomes') or ['YES', 'NO']
@@ -100,12 +106,34 @@ def get_active_markets(limit=100):
                 for i, outcome in enumerate(outcomes):
                     if i < len(prices):
                         try:
-                            price_map[str(outcome).upper()] = float(prices[i])
+                            p = prices[i]
+                            # Gamma returns prices as strings like "0.5" or as floats
+                            price_map[str(outcome).upper()] = float(p)
                         except:
                             pass
 
-                yes_price = price_map.get('YES', 0.5)
-                yes_pct = round(yes_price * 100, 1)
+                # Try lastTradePrice first, then bestAsk, then outcomePrices, then 0.5
+                yes_price = None
+                if not yes_price and price_map.get('YES', 0) not in [0, 0.5]:
+                    yes_price = price_map.get('YES')
+                if not yes_price:
+                    try:
+                        last = float(m.get('lastTradePrice') or 0)
+                        if last not in [0, 0.5]:
+                            yes_price = last
+                    except:
+                        pass
+                if not yes_price:
+                    try:
+                        best_ask = float(m.get('bestAsk') or 0)
+                        if best_ask not in [0, 0.5]:
+                            yes_price = best_ask
+                    except:
+                        pass
+                if not yes_price:
+                    yes_price = price_map.get('YES', 0.5)
+
+                yes_pct = round((yes_price or 0.5) * 100, 1)
 
                 clean.append({
                     'question': m.get('question', ''),
