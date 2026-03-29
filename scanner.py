@@ -277,13 +277,13 @@ def get_sis_signals():
 # ── Knowledge base ─────────────────────────────────────────────────────────
 def get_knowledge_context():
     try:
-        knowledge = sb.table('pit_knowledge').select('*').order('created_at', desc=True).limit(10).execute()
-        lessons = sb.table('pit_lessons').select('*').order('created_at', desc=True).limit(20).execute()
+        knowledge = sb.table('pit_knowledge').select('*').order('created_at', desc=True).limit(5).execute()
+lessons = sb.table('pit_lessons').select('*').order('created_at', desc=True).limit(10).execute()
         lines = []
         if knowledge.data:
             lines.append('=== KNOWLEDGE BASE ===')
             for k in knowledge.data:
-                lines.append(f'[{k["category"].upper()}] {k["title"]}: {k["content"][:400]}')
+                lines.append(f'[{k["category"].upper()}] {k["title"]}: {k["content"][:200]}')
         if lessons.data:
             lines.append('=== LESSONS LEARNED ===')
             for l in lessons.data:
