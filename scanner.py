@@ -969,6 +969,7 @@ def run_market_scan():
     _is_running_b = True
 
     try:
+        time.sleep(30)  # Wait 30s after Scanner A to avoid rate limit collision
         print(f'\n=== SCANNER B {now_utc().strftime("%Y-%m-%d %H:%M")} UTC ===')
 
         # Fetch markets and knowledge
