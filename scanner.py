@@ -360,21 +360,26 @@ def validate_signal(signal, markets_by_id):
 # ── Send Telegram ──────────────────────────────────────────────────────────
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
-        return
+        return None
     try:
         r = session.post(
             f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
             json={'chat_id': TG_CHAT, 'text': msg, 'parse_mode': 'Markdown'},
             timeout=10
         )
-        if not r.ok:
-            session.post(
+        if r.ok:
+            return r.json().get('result', {}).get('message_id')
+        else:
+            r2 = session.post(
                 f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
                 json={'chat_id': TG_CHAT, 'text': msg.replace('*', '').replace('_', '')},
                 timeout=10
             )
+            if r2.ok:
+                return r2.json().get('result', {}).get('message_id')
     except Exception as e:
         print(f'Telegram error: {e}')
+    return None
 
 # ── Build rich alert ───────────────────────────────────────────────────────
 def build_alert(signal, news_items=None, source='A'):
@@ -470,8 +475,16 @@ def process_signals(raw_signals, markets_by_id, news_items=None, source='A'):
         if signal.get('betType') == 'real':
             real_count += 1
             alert = build_alert(signal, news_items, source)
-            send_telegram(alert)
+            msg_id = send_telegram(alert)
             print(f'REAL ALERT sent [{source}]: {signal["question"][:60]}')
+            # Store message_id so reply-to works
+            if msg_id:
+                try:
+                    sb.table('pit_signals').update({
+                        'telegram_message_id': msg_id
+                    }).eq('condition_id', signal.get('conditionId')).eq('direction', signal.get('direction')).execute()
+                except Exception as e:
+                    print(f'Message ID save error: {e}')
 
         elif signal.get('betType') == 'paper':
             if not paper_trade_already_exists(condition_id, direction):
