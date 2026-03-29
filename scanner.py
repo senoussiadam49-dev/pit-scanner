@@ -124,10 +124,10 @@ def get_active_markets(limit=100):
                 continue
 
         print(f'Fetched {len(clean)} valid markets')
-# Debug: show top 10 prices to verify accuracy
-for m in clean[:10]:
-    print(f'  PRICE CHECK: "{m["question"][:50]}" → YES={m["yes_pct"]}%')
-return clean
+        # Debug: show top 10 prices to verify accuracy
+        for m in clean[:10]:
+            print(f'  PRICE CHECK: "{m["question"][:50]}" → YES={m["yes_pct"]}%')
+        return clean
     except Exception as e:
         print(f'ERROR fetching markets: {e}')
         return []
