@@ -305,6 +305,67 @@ def get_sis_signals():
         print(f'SIS error: {e}')
         return ''
 
+
+def check_sis_for_scanner_b():
+    """
+    Check for unprocessed SIS HIGH signals and run Scanner B immediately
+    if a new one has arrived since the last check.
+    This bridges SIS intelligence directly into Polymarket edge detection.
+    """
+    if not SIS_SUPABASE_URL or not SIS_SUPABASE_KEY:
+        return
+
+    try:
+        sis_sb = create_client(SIS_SUPABASE_URL, SIS_SUPABASE_KEY)
+
+        # Get HIGH signals from last 90 minutes that haven't been processed by PIT
+        cutoff = (now_utc() - __import__('datetime').timedelta(minutes=90)).isoformat()
+        new_signals = sis_sb.table('signals').select('*') \
+            .eq('signal_strength', 'HIGH') \
+            .gte('created_at', cutoff) \
+            .execute()
+
+        if not new_signals.data:
+            return
+
+        print(f'SIS bridge: {len(new_signals.data)} new HIGH signals — triggering Scanner B')
+
+        # Build context string from SIS signals to inject into Scanner B
+        sis_context = '=== URGENT SIS SIGNALS — SCAN FOR RELATED POLYMARKET MARKETS ===\n'
+        for s in new_signals.data:
+            sis_context += (
+                f'THEME: {s.get("theme")}\n'
+                f'HEADLINE: {s.get("headline")}\n'
+                f'SECOND ORDER: {s.get("second_order")}\n'
+                f'TICKERS: {s.get("tickers")}\n'
+                f'ACTION: {s.get("action")}\n\n'
+            )
+
+        # Fetch markets and run Scanner B with SIS context injected
+        all_markets = get_active_markets(limit=200)
+        if not all_markets:
+            return
+
+        knowledge = get_knowledge_context()
+        # Prepend SIS context to knowledge so Scanner B prioritises related markets
+        combined_knowledge = sis_context + '\n' + knowledge
+        markets_by_id = {m['conditionId']: m for m in all_markets}
+
+        eligible = get_scanner_b_markets(all_markets)
+        if not eligible:
+            return
+
+        print(f'SIS-triggered Scanner B: scoring {min(len(eligible), 10)} priority markets')
+
+        # Run one batch of top 10 markets with SIS context
+        signals = scanner_b_score_batch(eligible[:10], combined_knowledge)
+        if signals:
+            real_count, paper_count = process_signals(signals, markets_by_id, source='B')
+            print(f'SIS-triggered scan: {real_count} real alerts, {paper_count} paper trades')
+
+    except Exception as e:
+        print(f'SIS bridge error: {e}')
+
 # ── Knowledge base ─────────────────────────────────────────────────────────
 def get_knowledge_context():
     try:
@@ -1191,6 +1252,7 @@ if __name__ == '__main__':
     run_market_scan()
 
     schedule.every(30).minutes.do(run_market_scan)
+    schedule.every(15).minutes.do(check_sis_for_scanner_b)
 
     while True:
         schedule.run_pending()
