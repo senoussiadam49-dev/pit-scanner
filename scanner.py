@@ -32,6 +32,7 @@ GAMMA_API = 'https://gamma-api.polymarket.com'
 
 # ── Scan lock — prevent overlapping runs ──────────────────────────────────
 _is_running = False
+_is_running_b = False
 
 # ── Requests session with retries ─────────────────────────────────────────
 session = requests.Session()
@@ -63,13 +64,26 @@ RSS_FEEDS = [
     ('The Verge', 'https://www.theverge.com/rss/index.xml'),
 ]
 
+# ── Excluded market keywords — Scanner B will skip these ──────────────────
+EXCLUDED_KEYWORDS = [
+    'election', 'vote', 'ballot', 'federal reserve', 'fed rate', 'interest rate',
+    'nfl', 'nba', 'mlb', 'nhl', 'soccer', 'football', 'basketball', 'baseball',
+    'hockey', 'tennis', 'golf', 'formula 1', 'f1', 'ufc', 'boxing', 'wrestling',
+    'valorant', 'esport', 'dota', 'league of legends', 'cs2', 'overwatch',
+    'oscar', 'grammy', 'emmy', 'golden globe', 'academy award',
+]
+
+def is_excluded_market(question):
+    q = question.lower()
+    return any(kw in q for kw in EXCLUDED_KEYWORDS)
+
 # ── Fetch Polymarket markets ───────────────────────────────────────────────
-def get_active_markets():
+def get_active_markets(limit=100):
     try:
         r = session.get(f'{GAMMA_API}/markets', params={
             'active': 'true',
             'closed': 'false',
-            'limit': 100,
+            'limit': limit,
             'order': 'volume',
             'ascending': 'false'
         }, timeout=15)
@@ -77,13 +91,11 @@ def get_active_markets():
         data = r.json()
         markets = data if isinstance(data, list) else data.get('markets', [])
 
-        # Build clean market objects with validated fields
         clean = []
         for m in markets:
             try:
                 prices = m.get('outcomePrices') or []
                 outcomes = m.get('outcomes') or ['YES', 'NO']
-                # Build price map by outcome label
                 price_map = {}
                 for i, outcome in enumerate(outcomes):
                     if i < len(prices):
@@ -142,10 +154,6 @@ def get_recent_news():
 
 # ── Pre-filter: match news to markets ─────────────────────────────────────
 def match_news_to_markets(news, markets):
-    """
-    Instead of dumping everything to Claude, pre-match news headlines
-    to relevant markets using keyword overlap. Returns clusters.
-    """
     clusters = []
     for market in markets:
         if market['volume'] < 5000:
@@ -255,7 +263,7 @@ def get_sis_signals():
         return ''
     try:
         sis_sb = create_client(SIS_SUPABASE_URL, SIS_SUPABASE_KEY)
-        signals = sis_sb.table('sis_signals').select('*').eq('signal_strength', 'HIGH').eq('processed', False).order('created_at', desc=True).limit(5).execute()
+        signals = sis_sb.table('signals').select('*').eq('signal_strength', 'HIGH').eq('processed', False).order('created_at', desc=True).limit(5).execute()
         if not signals.data:
             return ''
         lines = ['=== SIS HIGH SIGNALS ===']
@@ -290,7 +298,6 @@ def get_knowledge_context():
 
 # ── Deduplication ──────────────────────────────────────────────────────────
 def signal_already_exists(condition_id, direction):
-    """Check if we already sent this signal today."""
     try:
         today = now_utc().strftime('%Y-%m-%d')
         existing = sb.table('pit_signals').select('id').eq('condition_id', condition_id).eq('direction', direction).gte('created_at', today).execute()
@@ -299,7 +306,6 @@ def signal_already_exists(condition_id, direction):
         return False
 
 def paper_trade_already_exists(condition_id, direction):
-    """Check if open paper trade already exists for this market."""
     try:
         existing = sb.table('pit_paper_trades').select('id').eq('condition_id', condition_id).eq('direction', direction).eq('status', 'OPEN').execute()
         return len(existing.data) > 0
@@ -308,26 +314,19 @@ def paper_trade_already_exists(condition_id, direction):
 
 # ── Validate signal against real market data ───────────────────────────────
 def validate_signal(signal, markets_by_id):
-    """
-    Hard validation after Claude output.
-    Returns (valid, reason, enriched_signal)
-    """
     condition_id = signal.get('conditionId', '')
     direction = signal.get('direction', '').upper()
     true_p = signal.get('trueP', 0)
     market_odds = signal.get('marketOdds', 0)
     edge_pp = signal.get('edgePp', 0)
 
-    # 1. conditionId must exist in our fetched markets
     market = markets_by_id.get(condition_id)
     if not market:
         return False, f'conditionId {condition_id} not found in active markets', signal
 
-    # 2. Direction must be valid
     if direction not in ['YES', 'NO']:
         return False, f'Invalid direction: {direction}', signal
 
-    # 3. Verify market odds against real data (allow 15pp tolerance)
     real_yes_pct = market['yes_pct']
     if direction == 'YES':
         real_market_odds = real_yes_pct
@@ -339,12 +338,10 @@ def validate_signal(signal, markets_by_id):
         print(f'WARNING: Claude said {market_odds}% but real odds are {real_market_odds}% — correcting')
         signal['marketOdds'] = real_market_odds
 
-    # 4. Verify edge is mathematically consistent
     expected_edge = abs(true_p - real_market_odds)
     if abs(expected_edge - edge_pp) > 10:
         signal['edgePp'] = round(expected_edge, 1)
 
-    # 5. Verify betType follows our rules
     conviction = signal.get('conviction', 0)
     rr = signal.get('resolutionRisk', 5)
     actual_edge = signal['edgePp']
@@ -354,7 +351,6 @@ def validate_signal(signal, markets_by_id):
             signal['betType'] = 'paper'
             print(f'Downgraded to paper: conviction={conviction}, rr={rr}, edge={actual_edge}')
 
-    # 6. Enrich with real market data
     signal['question'] = market['question']
     signal['resolutionDate'] = market['endDate']
     signal['realYesPct'] = real_yes_pct
@@ -365,7 +361,6 @@ def validate_signal(signal, markets_by_id):
 def send_telegram(msg):
     if not TG_TOKEN or not TG_CHAT:
         return
-    # Sanitize markdown
     try:
         r = session.post(
             f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
@@ -373,7 +368,6 @@ def send_telegram(msg):
             timeout=10
         )
         if not r.ok:
-            # Try without markdown if formatting fails
             session.post(
                 f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
                 json={'chat_id': TG_CHAT, 'text': msg.replace('*', '').replace('_', '')},
@@ -383,9 +377,9 @@ def send_telegram(msg):
         print(f'Telegram error: {e}')
 
 # ── Build rich alert ───────────────────────────────────────────────────────
-def build_alert(signal, news_items):
+def build_alert(signal, news_items=None, source='A'):
     triggering_news = signal.get('newsSource', '')
-    if not triggering_news:
+    if not triggering_news and news_items:
         for n in news_items:
             q_words = set(re.findall(r'\b\w{4,}\b', signal.get('question', '').lower()))
             n_words = set(re.findall(r'\b\w{4,}\b', n['title'].lower()))
@@ -394,19 +388,21 @@ def build_alert(signal, news_items):
                 break
 
     market_url = f'https://polymarket.com/event/{signal.get("conditionId", "")}'
+    scanner_tag = '📡 Scanner B — Market Mispricing' if source == 'B' else '📰 Scanner A — News Signal'
 
     return (
-        f'⚡ *PIT AUTO-BET PENDING*\n\n'
+        f'⚡ *PIT ALERT*\n'
+        f'_{scanner_tag}_\n\n'
         f'*{signal["question"][:100]}*\n\n'
         f'*Direction:* {signal["direction"]} @ {signal["marketOdds"]}%\n'
         f'*True P:* {signal["trueP"]}% | *Edge:* +{signal["edgePp"]}pp\n'
         f'*Conviction:* {signal["conviction"]}/10 | *RR:* {signal["resolutionRisk"]}/5\n'
         f'*Resolves:* {signal.get("resolutionDate", "?")}\n\n'
-        f'📰 *Why NOW:*\n_{triggering_news or "Multiple signals converging"}_\n\n'
         f'🎯 *Edge:* _{signal.get("thesis", "")}_\n\n'
         f'⚠️ *Bear case:* _{signal.get("bearCase", "Not specified")}_\n\n'
         f'📋 *Resolution:* _{signal.get("resolutionCriteria", "Check Polymarket")}_\n\n'
-        f'🔗 {market_url}\n\n'
+        + (f'📰 *Signal:* _{triggering_news}_\n\n' if triggering_news else '')
+        + f'🔗 {market_url}\n\n'
         f'Reply *Y* to place $25 | *N* to skip\n'
         f'⏳ 5 minute window'
     )
@@ -450,6 +446,42 @@ def save_paper_trade(signal):
         print(f'Paper trade saved: {signal.get("question", "")[:60]}')
     except Exception as e:
         print(f'Paper trade save error: {e}')
+
+# ── Process signals (shared by Scanner A and B) ───────────────────────────
+def process_signals(raw_signals, markets_by_id, news_items=None, source='A'):
+    real_count = 0
+    paper_count = 0
+
+    for raw in raw_signals:
+        valid, reason, signal = validate_signal(raw, markets_by_id)
+        if not valid:
+            print(f'INVALID signal: {reason}')
+            continue
+
+        condition_id = signal.get('conditionId')
+        direction = signal.get('direction')
+
+        if signal_already_exists(condition_id, direction):
+            print(f'DUPLICATE skipped: {signal["question"][:50]}')
+            continue
+
+        save_signal(signal)
+
+        if signal.get('betType') == 'real':
+            real_count += 1
+            alert = build_alert(signal, news_items, source)
+            send_telegram(alert)
+            print(f'REAL ALERT sent [{source}]: {signal["question"][:60]}')
+
+        elif signal.get('betType') == 'paper':
+            if not paper_trade_already_exists(condition_id, direction):
+                paper_count += 1
+                save_paper_trade(signal)
+                print(f'Paper trade [{source}]: {signal["question"][:60]}')
+            else:
+                print(f'Paper trade already open: {signal["question"][:50]}')
+
+    return real_count, paper_count
 
 # ── Resolve paper trades ───────────────────────────────────────────────────
 def resolve_paper_trades():
@@ -548,9 +580,8 @@ def extract_lesson(trade, outcome, won):
     except:
         return ''
 
-# ── Stage 1: shortlist candidates ─────────────────────────────────────────
+# ── Stage 1: shortlist candidates (Scanner A) ──────────────────────────────
 def stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis):
-    """Ask Claude to shortlist the most promising market-news pairs."""
     if not clusters:
         return []
 
@@ -574,9 +605,10 @@ def stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis):
         f'You are a Polymarket signal detector.\n\n'
         f'Below are market-news clusters where breaking news may not yet be priced in.\n\n'
         f'MARKET-NEWS CLUSTERS:\n{cluster_text}\n\n'
-        f'Select the TOP 5 clusters where there is a genuine slow-update or second-order edge.\n'
+        f'Select up to 5 clusters where breaking news has NOT yet been priced into the market odds.\n'
+        f'Only include if you can identify a specific reason the odds are stale or wrong.\n'
         f'Apply all knowledge base lessons before selecting.\n'
-        f'Exclude elections, Fed decisions, slow political markets.\n\n'
+        f'Exclude only elections and Fed interest rate decisions. Include geopolitical, tech, corporate, and energy markets.\n\n'
         f'Return ONLY a JSON array of conditionIds inside <shortlist> tags:\n'
         f'<shortlist>["id1", "id2", "id3"]</shortlist>'
     )
@@ -598,9 +630,8 @@ def stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis):
         print(f'Stage 1 error: {e}')
         return []
 
-# ── Stage 2: score shortlisted candidates ─────────────────────────────────
+# ── Stage 2: score shortlisted candidates (Scanner A) ─────────────────────
 def stage2_score(shortlisted_ids, clusters, knowledge, news):
-    """Deep score only the shortlisted markets."""
     shortlisted = [c for c in clusters if c['market']['conditionId'] in shortlisted_ids]
     if not shortlisted:
         return []
@@ -674,18 +705,206 @@ def stage2_score(shortlisted_ids, clusters, knowledge, news):
         print(f'Stage 2 error: {e}')
         return []
 
-# ── Main scan ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# SCANNER B — Market-Driven Mispricing Scanner
+# No news dependency. Scans all markets and asks: is this price wrong?
+# ══════════════════════════════════════════════════════════════════════════
+
+def get_scanner_b_markets(all_markets):
+    """
+    Filter markets for Scanner B:
+    - Exclude sports, esports, elections, Fed decisions
+    - Minimum volume $10k (liquid enough to bet)
+    - Resolving within 90 days (not too far out)
+    - Not already in an open paper trade
+    """
+    today = now_utc().strftime('%Y-%m-%d')
+    cutoff_90d = now_utc().replace(month=now_utc().month).strftime('%Y-%m-%d')
+
+    from datetime import timedelta
+    cutoff = (now_utc() + timedelta(days=90)).strftime('%Y-%m-%d')
+
+    filtered = []
+    for m in all_markets:
+        if is_excluded_market(m['question']):
+            continue
+        if m['volume'] < 10000:
+            continue
+        if m['endDate'] and m['endDate'] > cutoff:
+            continue
+        if m['endDate'] and m['endDate'] < today:
+            continue
+        # Skip if already have open paper trade
+        if paper_trade_already_exists(m['conditionId'], 'YES') or paper_trade_already_exists(m['conditionId'], 'NO'):
+            continue
+        filtered.append(m)
+
+    # Sort by volume descending, take top 150
+    filtered.sort(key=lambda x: -x['volume'])
+    print(f'Scanner B: {len(filtered)} eligible markets after filtering')
+    return filtered[:150]
+
+
+def scanner_b_score_batch(markets_batch, knowledge):
+    """
+    Ask Claude to identify mispricings in a batch of markets.
+    No news context — uses Claude's world knowledge only.
+    """
+    market_text = ''
+    for m in markets_batch:
+        market_text += (
+            f'Market: "{m["question"]}"\n'
+            f'conditionId: {m["conditionId"]}\n'
+            f'YES odds: {m["yes_pct"]}% | Volume: ${int(m["volume"]):,} | Resolves: {m["endDate"]}\n\n'
+        )
+
+    prompt = (
+        f'{knowledge}\n\n'
+        f'You are a prediction market analyst with deep knowledge of world events, geopolitics, technology, science, regulation, and business.\n\n'
+        f'Below are {len(markets_batch)} active Polymarket markets. For each one, assess whether the current odds are WRONG based on your knowledge.\n\n'
+        f'PERMITTED MARKET TYPES for Scanner B:\n'
+        f'- Geopolitical outcomes (ceasefires, sanctions, diplomatic events, military actions)\n'
+        f'- Tech & AI corporate events (product launches, regulatory decisions, company milestones)\n'
+        f'- Scientific milestones (drug approvals, space missions, research breakthroughs)\n'
+        f'- Regulatory & legal decisions (court rulings, antitrust, government approvals)\n'
+        f'- Corporate & business events (CEO changes, mergers, earnings, product launches)\n'
+        f'- Energy & commodity policy (OPEC decisions, pipeline policy, energy security)\n'
+        f'- Second-order consequences of major events\n\n'
+        f'STRICTLY EXCLUDED — return nothing for these:\n'
+        f'- Elections and political referendums\n'
+        f'- Federal Reserve interest rate decisions\n'
+        f'- Sports and esports outcomes\n'
+        f'- Entertainment awards\n\n'
+        f'MARKETS TO ASSESS:\n{market_text}\n\n'
+        f'Apply ALL knowledge base lessons before deciding.\n'
+        f'For each market where you identify a genuine mispricing:\n'
+        f'- You must have a SPECIFIC reason the price is wrong (not just a general thesis)\n'
+        f'- The edge must be based on something the average bettor is likely missing\n'
+        f'- Resolution risk must be ≤ 3 (clear, verifiable outcome)\n'
+        f'- Conviction must be ≥ 6\n\n'
+        f'If no genuine mispricing exists in this batch, return an empty array.\n\n'
+        f'Return JSON inside <signals> tags:\n'
+        f'<signals>\n'
+        f'[\n'
+        f'  {{\n'
+        f'    "question": "exact question",\n'
+        f'    "conditionId": "exact conditionId from above",\n'
+        f'    "tokenId": "",\n'
+        f'    "direction": "YES or NO",\n'
+        f'    "marketOdds": 45,\n'
+        f'    "trueP": 62,\n'
+        f'    "edgePp": 17,\n'
+        f'    "conviction": 7,\n'
+        f'    "resolutionRisk": 2,\n'
+        f'    "edgeType": "base_rate_anchor or second_order or info_lag or stale_odds",\n'
+        f'    "resolutionDate": "YYYY-MM-DD",\n'
+        f'    "thesis": "one specific sentence: exactly what the market is getting wrong and why",\n'
+        f'    "bearCase": "one sentence: what would prove this wrong",\n'
+        f'    "resolutionCriteria": "how this market resolves",\n'
+        f'    "newsSource": "",\n'
+        f'    "betType": "real or paper"\n'
+        f'  }}\n'
+        f']\n'
+        f'</signals>\n\n'
+        f'Rules:\n'
+        f'- Only include markets with a SPECIFIC mispricing reason — not vague theses\n'
+        f'- conviction 1-10, only include >= 6\n'
+        f'- resolutionRisk 1-5, exclude >= 4\n'
+        f'- betType real ONLY if conviction >= 8 AND resolutionRisk <= 2 AND edgePp >= 7\n'
+        f'- betType paper if conviction 6-7 OR resolutionRisk = 3\n'
+        f'- Quality over quantity — 0 signals is correct if nothing is genuinely mispriced\n'
+        f'- If no genuine mispricing: return <signals>[]</signals>'
+    )
+
+    try:
+        msg = claude.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=3000,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        response = msg.content[0].text
+        match = re.search(r'<signals>(.*?)</signals>', response, re.DOTALL)
+        if not match:
+            return []
+        signals = json.loads(match.group(1).strip())
+        return signals
+    except json.JSONDecodeError as e:
+        print(f'Scanner B JSON error: {e}')
+        return []
+    except Exception as e:
+        print(f'Scanner B batch error: {e}')
+        return []
+
+
+def run_market_scan():
+    """
+    Scanner B — Market-driven mispricing scanner.
+    Scans all eligible markets and finds mispricings using Claude's world knowledge.
+    No news dependency.
+    """
+    global _is_running_b
+    if _is_running_b:
+        print('Scanner B already running — skipping')
+        return
+    _is_running_b = True
+
+    try:
+        print(f'\n=== SCANNER B {now_utc().strftime("%Y-%m-%d %H:%M")} UTC ===')
+
+        # Fetch markets and knowledge
+        all_markets = get_active_markets(limit=200)
+        if not all_markets:
+            print('Scanner B: No markets fetched')
+            return
+
+        knowledge = get_knowledge_context()
+        markets_by_id = {m['conditionId']: m for m in all_markets}
+
+        # Filter to eligible markets
+        eligible = get_scanner_b_markets(all_markets)
+        if not eligible:
+            print('Scanner B: No eligible markets after filtering')
+            return
+
+        print(f'Scanner B: Scoring {len(eligible)} markets in batches of 20')
+
+        # Process in batches of 20
+        all_signals = []
+        batch_size = 20
+        for i in range(0, min(len(eligible), 100), batch_size):
+            batch = eligible[i:i + batch_size]
+            print(f'Scanner B: Batch {i//batch_size + 1} ({len(batch)} markets)...')
+            signals = scanner_b_score_batch(batch, knowledge)
+            if signals:
+                all_signals.extend(signals)
+                print(f'Scanner B: Found {len(signals)} signals in batch')
+            time.sleep(2)  # Rate limiting between batches
+
+        if not all_signals:
+            print('Scanner B: No mispricings found this scan')
+            return
+
+        print(f'Scanner B: Total {len(all_signals)} signals to validate')
+        real_count, paper_count = process_signals(all_signals, markets_by_id, source='B')
+        print(f'=== Scanner B complete: {real_count} real alerts, {paper_count} paper trades ===')
+
+    except Exception as e:
+        print(f'SCANNER B ERROR: {e}')
+        send_telegram(f'⚠️ Scanner B error: {str(e)[:100]}')
+    finally:
+        _is_running_b = False
+
+# ── Scanner A — News-driven scan ──────────────────────────────────────────
 def run_scan():
     global _is_running
     if _is_running:
-        print('Scan already running — skipping')
+        print('Scanner A already running — skipping')
         return
     _is_running = True
 
     try:
-        print(f'\n=== PIT SCAN v2 {now_utc().strftime("%Y-%m-%d %H:%M")} UTC ===')
+        print(f'\n=== SCANNER A {now_utc().strftime("%Y-%m-%d %H:%M")} UTC ===')
 
-        # Fetch all data sources
         markets = get_active_markets()
         news = get_recent_news()
         knowledge = get_knowledge_context()
@@ -698,10 +917,8 @@ def run_scan():
             print('No markets — aborting scan')
             return
 
-        # Build lookup by conditionId
         markets_by_id = {m['conditionId']: m for m in markets}
 
-        # Pre-filter: match news to markets
         clusters = match_news_to_markets(news, markets)
         if not clusters:
             print('No market-news clusters found')
@@ -710,8 +927,8 @@ def run_scan():
         # Stage 1: shortlist
         shortlisted_ids = stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis)
         if not shortlisted_ids:
-    print('Stage 1 returned nothing — falling back to top 5 clusters')
-    shortlisted_ids = [c['market']['conditionId'] for c in clusters[:5]]
+            print('Stage 1 returned nothing — falling back to top 5 clusters')
+            shortlisted_ids = [c['market']['conditionId'] for c in clusters[:5]]
 
         # Stage 2: score
         raw_signals = stage2_score(shortlisted_ids, clusters, knowledge, news)
@@ -719,67 +936,38 @@ def run_scan():
             print('No signals from stage 2')
             return
 
-        # Validate, deduplicate, save
-        real_count = 0
-        paper_count = 0
-
-        for raw in raw_signals:
-            valid, reason, signal = validate_signal(raw, markets_by_id)
-            if not valid:
-                print(f'INVALID signal: {reason}')
-                continue
-
-            condition_id = signal.get('conditionId')
-            direction = signal.get('direction')
-
-            # Deduplication check
-            if signal_already_exists(condition_id, direction):
-                print(f'DUPLICATE skipped: {signal["question"][:50]}')
-                continue
-
-            save_signal(signal)
-
-            if signal.get('betType') == 'real':
-                real_count += 1
-                alert = build_alert(signal, news)
-                send_telegram(alert)
-                print(f'REAL ALERT sent: {signal["question"][:60]}')
-
-            elif signal.get('betType') == 'paper':
-                if not paper_trade_already_exists(condition_id, direction):
-                    paper_count += 1
-                    save_paper_trade(signal)
-                    print(f'Paper trade: {signal["question"][:60]}')
-                else:
-                    print(f'Paper trade already open: {signal["question"][:50]}')
-
-        print(f'=== Scan complete: {real_count} real alerts, {paper_count} paper trades ===')
+        real_count, paper_count = process_signals(raw_signals, markets_by_id, news, source='A')
+        print(f'=== Scanner A complete: {real_count} real alerts, {paper_count} paper trades ===')
 
     except Exception as e:
-        print(f'SCAN ERROR: {e}')
-        send_telegram(f'⚠️ PIT Scanner error: {str(e)[:100]}')
+        print(f'SCANNER A ERROR: {e}')
+        send_telegram(f'⚠️ Scanner A error: {str(e)[:100]}')
     finally:
         _is_running = False
 
-    # Resolve paper trades
+    # Resolve paper trades after every Scanner A run
     resolve_paper_trades()
 
 # ── Schedule ───────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    print('PIT Scanner v2 starting...')
+    print('PIT Scanner v3 starting...')
     send_telegram(
-        '🟢 *PIT Scanner v2 started*\n\n'
-        'Improvements:\n'
-        '✓ Two-stage signal detection\n'
-        '✓ Hard market validation\n'
-        '✓ Deduplication\n'
-        '✓ Fixed resolution logic\n'
-        '✓ Scan lock\n'
-        '✓ 12 news sources + Metaculus + GDELT + EIA + SIS\n\n'
+        '🟢 *PIT Scanner v3 started*\n\n'
+        '✓ Scanner A — News-driven signals\n'
+        '✓ Scanner B — Market mispricing detection\n'
+        '✓ Expanded market types\n'
+        '✓ KB + lessons injected into both scanners\n'
+        '✓ Auto paper trade resolution alerts\n\n'
         'Scanning every 30 min 24/7'
     )
+    # Run both scanners on startup
     run_scan()
+    run_market_scan()
+
+    # Scanner A every 30 min, Scanner B every 60 min (heavier)
     schedule.every(30).minutes.do(run_scan)
+    schedule.every(60).minutes.do(run_market_scan)
+
     while True:
         schedule.run_pending()
         time.sleep(60)
