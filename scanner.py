@@ -710,8 +710,8 @@ def run_scan():
         # Stage 1: shortlist
         shortlisted_ids = stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis)
         if not shortlisted_ids:
-            print('No shortlisted markets')
-            return
+    print('Stage 1 returned nothing — falling back to top 5 clusters')
+    shortlisted_ids = [c['market']['conditionId'] for c in clusters[:5]]
 
         # Stage 2: score
         raw_signals = stage2_score(shortlisted_ids, clusters, knowledge, news)
