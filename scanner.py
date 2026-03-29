@@ -539,15 +539,20 @@ def resolve_paper_trades():
                     'status': 'PENDING_RESOLVE'
                 }).eq('id', trade['id']).execute()
 
+                market_url = f'https://polymarket.com/event/{trade["condition_id"]}'
                 send_telegram(
                     f'📊 *PAPER TRADE RESOLVED*\n\n'
                     f'*{trade["market_question"][:80]}*\n\n'
                     f'Your call: *{trade["direction"]}* @ {trade["market_odds"]}%\n'
                     f'Resolved: *{outcome}* | {result}\n'
                     f'Paper P&L: ${pnl:+.2f}\n\n'
-                    f'Thesis: _{trade.get("thesis", "")[:150]}_\n\n'
-                    f'Reply *Y* to extract lesson + save to knowledge base\n'
-                    f'Reply *N* to skip'
+                    f'Original thesis: _{trade.get("thesis", "")[:120]}_\n\n'
+                    f'🔗 {market_url}\n\n'
+                    f'*To save a rich lesson:*\n'
+                    f'Go to the market link → copy resolution text → paste it here\n\n'
+                    f'*Or just reply:*\n'
+                    f'*Y* — confirm, basic lesson extracted\n'
+                    f'*N* — skip, keep open for manual review'
                 )
                 print(f'Notified: {trade["market_question"][:50]} → {outcome} | {result}')
 
