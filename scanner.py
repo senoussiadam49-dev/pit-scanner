@@ -93,12 +93,6 @@ def get_active_markets(limit=100):
 
         clean = []
         for m in markets:
-            # Temp debug — remove after fixing
-            if len(clean) == 0:
-                print(f'RAW MARKET FIELDS: {list(m.keys())}')
-                print(f'RAW outcomePrices: {m.get("outcomePrices")}')
-                print(f'RAW lastTradePrice: {m.get("lastTradePrice")}')
-                print(f'RAW bestAsk: {m.get("bestAsk")}')
             try:
                 prices = m.get('outcomePrices') or []
                 outcomes = m.get('outcomes') or ['YES', 'NO']
@@ -152,9 +146,6 @@ def get_active_markets(limit=100):
                 continue
 
         print(f'Fetched {len(clean)} valid markets')
-        # Debug: show top 10 prices to verify accuracy
-        for m in clean[:10]:
-            print(f'  PRICE CHECK: "{m["question"][:50]}" → YES={m["yes_pct"]}%')
         return clean
     except Exception as e:
         print(f'ERROR fetching markets: {e}')
@@ -721,6 +712,121 @@ def extract_lesson(trade, outcome, won):
     except:
         return ''
 
+
+def extract_lesson_sync(trade, resolution_context):
+    try:
+        msg = claude.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=600,
+            messages=[{
+                'role': 'user',
+                'content': f"""Extract a calibration lesson from this resolved prediction market trade.
+
+TRADE:
+Market: "{trade.get('market_question')}"
+Direction: {trade.get('direction')} @ {trade.get('market_odds')}%
+True P estimate: {trade.get('true_p')}%
+Edge claimed: {trade.get('edge_pp')}pp
+Outcome: {resolution_context}
+Thesis: {trade.get('thesis', 'not recorded')}
+
+Format as exactly two lines:
+LESSON: [2-3 sentences: what happened, was the thesis right, calibration note, actionable rule]
+PATTERN: [One sentence: what type of market this applies to in future]
+
+Return ONLY the LESSON and PATTERN lines."""
+            }]
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        print(f'Lesson extraction error: {e}')
+        return ''
+
+
+def auto_resolve_paper_trades():
+    try:
+        open_trades = sb.table('pit_paper_trades').select('*').eq('status', 'OPEN').execute()
+        if not open_trades.data:
+            print('Auto-resolve: no open paper trades')
+            return
+
+        print(f'Auto-resolve: checking {len(open_trades.data)} open trades')
+        resolved_count = 0
+
+        for trade in open_trades.data:
+            condition_id = trade.get('condition_id')
+            if not condition_id:
+                continue
+            try:
+                r = session.get(
+                    f'{GAMMA_API}/markets',
+                    params={'conditionId': condition_id},
+                    timeout=10
+                )
+                data = r.json()
+                markets = data if isinstance(data, list) else data.get('markets', [])
+                if not markets:
+                    continue
+
+                market = markets[0]
+                if not market.get('resolved', False):
+                    continue
+
+                outcomes = market.get('outcomes', ['YES', 'NO'])
+                prices = market.get('outcomePrices', [])
+                outcome = None
+                for i, o in enumerate(outcomes):
+                    if i < len(prices):
+                        try:
+                            if float(prices[i]) >= 0.99:
+                                outcome = str(o).upper()
+                                break
+                        except:
+                            pass
+
+                if not outcome:
+                    continue
+
+                direction = trade.get('direction', '').upper()
+                won = outcome == direction
+                stake = trade.get('stake', 25)
+                market_odds = trade.get('market_odds', 50)
+                pnl = round(stake * (100 - market_odds) / market_odds, 2) if won else -stake
+
+                resolution_context = f'Market resolved {outcome}. Auto-detected via Gamma API.'
+                lesson = extract_lesson_sync(trade, resolution_context)
+
+                sb.table('pit_paper_trades').update({
+                    'status': 'CLOSED',
+                    'outcome': outcome,
+                    'pnl': pnl,
+                    'resolved_at': now_utc_iso(),
+                    'lesson': lesson or None
+                }).eq('id', trade['id']).execute()
+
+                resolved_count += 1
+
+                msg = (
+                    f'{"✅" if won else "❌"} *AUTO-RESOLVED PAPER TRADE*\n\n'
+                    f'*{trade["market_question"][:80]}*\n'
+                    f'{direction} → Resolved {outcome}\n'
+                    f'P&L: ${"+" if pnl >= 0 else ""}{pnl}\n\n'
+                    f'💡 *Lesson:*\n_{lesson[:300] if lesson else "None extracted"}_'
+                )
+                send_telegram(msg)
+                print(f'Auto-resolved: {trade["market_question"][:60]} → {outcome} ({"WON" if won else "LOST"})')
+                time.sleep(2)
+
+            except Exception as e:
+                print(f'Auto-resolve error for {condition_id}: {e}')
+                continue
+
+        print(f'Auto-resolve complete: {resolved_count} trades closed')
+
+    except Exception as e:
+        print(f'AUTO-RESOLVE ERROR: {e}')
+
+
 # ── Stage 1: shortlist candidates (Scanner A) ──────────────────────────────
 def stage1_shortlist(clusters, knowledge, metaculus, gdelt, eia, sis):
     if not clusters:
@@ -869,7 +975,14 @@ def get_scanner_b_markets(all_markets):
     from datetime import timedelta
     cutoff = (now_utc() + timedelta(days=90)).strftime('%Y-%m-%d')
 
-    filtered = []
+    from datetime import timedelta
+    cutoff_7d = (now_utc() + timedelta(days=7)).strftime('%Y-%m-%d')
+    cutoff_30d = (now_utc() + timedelta(days=30)).strftime('%Y-%m-%d')
+    cutoff_90d = (now_utc() + timedelta(days=90)).strftime('%Y-%m-%d')
+
+    priority = []
+    secondary = []
+
     for m in all_markets:
         if is_excluded_market(m['question']):
             continue
@@ -877,19 +990,22 @@ def get_scanner_b_markets(all_markets):
             continue
         if not m['endDate'] or m['endDate'] < today:
             continue
-        if m['endDate'] > cutoff:
+        if m['endDate'] > cutoff_90d:
             continue
         if m.get('resolved') or m.get('closed'):
             continue
-        # Skip if already have open paper trade
         if paper_trade_already_exists(m['conditionId'], 'YES') or paper_trade_already_exists(m['conditionId'], 'NO'):
             continue
-        filtered.append(m)
+        if m['endDate'] <= cutoff_7d:
+            priority.append(m)
+        else:
+            secondary.append(m)
 
-    # Sort by volume descending, take top 150
-    filtered.sort(key=lambda x: -x['volume'])
-    print(f'Scanner B: {len(filtered)} eligible markets after filtering')
-    return filtered[:150]
+    priority.sort(key=lambda x: (x['endDate'], -x['volume']))
+    secondary.sort(key=lambda x: -x['volume'])
+    combined = priority + secondary
+    print(f'Scanner B: {len(priority)} priority (1-7d) + {len(secondary)} secondary (8-90d) = {len(combined)} eligible')
+    return combined[:150]
 
 
 def scanner_b_score_batch(markets_batch, knowledge):
@@ -1253,6 +1369,7 @@ if __name__ == '__main__':
 
     schedule.every(30).minutes.do(run_market_scan)
     schedule.every(15).minutes.do(check_sis_for_scanner_b)
+    schedule.every().day.at("08:00").do(auto_resolve_paper_trades)
 
     while True:
         schedule.run_pending()
