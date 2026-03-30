@@ -1041,7 +1041,7 @@ def scanner_b_score_batch(markets_batch, knowledge):
 
 Then in the `MASTER_PROMPT`, find the THREE GATES section and replace G3:
 ```
-G3 — IS RESOLUTION RISK ≤3?
+G3 - IS RESOLUTION RISK <=3?
 Read the actual resolution rules before assigning RR. If you haven't quoted the exact trigger language, you haven't done this step.
 ```
 
@@ -1080,7 +1080,7 @@ Auto-PASS (stop immediately, no analysis): elections, Fed rate decisions, sports
 G2 — CAN YOU STATE THE EDGE IN ONE FALSIFIABLE SENTENCE?
 Not "this seems underpriced." One sentence: what specific fact does the market not yet reflect, and where did you find it?
 
-G3 — IS RESOLUTION RISK ≤3?
+G3 - IS RESOLUTION RISK <=3?
 Read the actual resolution rules before assigning RR. If you haven't quoted the exact trigger language, you haven't done this step.
 
 ═══ STEP 1 — MANDATORY RESEARCH ═══
