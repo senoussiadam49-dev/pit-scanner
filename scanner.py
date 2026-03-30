@@ -1015,11 +1015,51 @@ def scanner_b_score_batch(markets_batch, knowledge):
     """
     market_text = ''
     for m in markets_batch:
+        # Fetch actual resolution rules from Polymarket
+        rules_text = ''
+        try:
+            slug = m.get('slug', '')
+            if slug:
+                r = session.get(
+                    f'https://gamma-api.polymarket.com/markets',
+                    params={'slug': slug},
+                    timeout=10
+                )
+                data = r.json()
+                market_data = data[0] if isinstance(data, list) and data else {}
+                rules_text = market_data.get('description', '')[:1000]
+        except Exception as e:
+            print(f'Rules fetch error for {m["question"][:40]}: {e}')
+
         market_text += (
             f'Market: "{m["question"]}"\n'
             f'conditionId: {m["conditionId"]}\n'
-            f'YES odds: {m["yes_pct"]}% | Volume: ${int(m["volume"]):,} | Resolves: {m["endDate"]}\n\n'
+            f'YES odds: {m["yes_pct"]}% | Volume: ${int(m["volume"]):,} | Resolves: {m["endDate"]}\n'
+            f'RESOLUTION RULES: {rules_text if rules_text else "FETCH REQUIRED — search Polymarket for exact rules before scoring"}\n\n'
         )
+```
+
+Then in the `MASTER_PROMPT`, find the THREE GATES section and replace G3:
+```
+G3 — IS RESOLUTION RISK ≤3?
+Read the actual resolution rules before assigning RR. If you haven't quoted the exact trigger language, you haven't done this step.
+```
+
+Replace with:
+```
+G3 — RESOLUTION CRITERIA MANDATORY CHECK (cannot be skipped):
+The RESOLUTION RULES are provided above for each market. You must:
+1. Quote the exact trigger language that causes YES resolution
+2. Quote any explicit exclusions (intercepted missiles, unverified sources, etc.)
+3. Check whether any confirmed events ACTUALLY meet the exact criteria — not just "the event happened"
+4. If resolution rules were not provided: web search "polymarket [market question] resolution criteria" before proceeding
+If you cannot quote the exact resolution trigger: PASS — do not estimate probability.
+AUTOMATIC FAIL conditions:
+- "Intercepted" attacks when rules require physical impact
+- "Announced" events when rules require "in effect"  
+- "Reported by any source" when rules require named specific sources
+- Any ambiguity in what counts as the triggering event
+If any automatic fail condition applies: output PASS with G3 FAIL and quote the specific exclusion clause.
 
     MASTER_PROMPT = """You are PIT Scanner — a prediction market analyst. Your only job is to find markets where the crowd price is provably wrong. You do this by running a rigorous mathematical framework, not by intuition.
 
