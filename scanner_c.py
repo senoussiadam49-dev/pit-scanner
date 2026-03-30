@@ -208,6 +208,7 @@ def save_signal(signal):
             'edge_type':       'high_probability',
             'resolution_date': signal.get('resolutionDate') or None,
             'thesis':          signal.get('thesis'),
+            'kelly_stake':     signal.get('kellyStake', 2.0),
         }).execute()
     except Exception as e:
         print(f'Signal save error: {e}')
