@@ -1404,12 +1404,8 @@ if __name__ == '__main__':
         '✓ Auto paper trade resolution alerts\n\n'
         'Scanning every 30 min 24/7'
     )
-    # Scanner B only — Scanner A disabled to reduce API costs
-    run_market_scan()
-
-    schedule.every(30).minutes.do(run_market_scan)
-    schedule.every(15).minutes.do(check_sis_for_scanner_b)
-    schedule.every().day.at("08:00").do(auto_resolve_paper_trades)
+    # ALL SCANNERS DISABLED — Scanner C running in scanner_c.py
+    print('scanner.py — all scanners disabled, running scanner_c.py separately')
 
     while True:
         schedule.run_pending()
