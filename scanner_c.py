@@ -43,8 +43,8 @@ def now_utc_iso():
 # Probability thresholds
 C_MIN_PROB     = 94.0   # market must be ≥94% in one direction
 C_MAX_PROB     = 96.0   # cap at 96% — above this spread is too thin
-C_MIN_VOLUME   = 50000  # minimum $50k volume
-C_MAX_DAYS     = 14     # max days to resolution
+C_MIN_VOLUME   = 5000   # minimum $5k volume
+C_MAX_DAYS     = 30     # max days to resolution
 C_MIN_DAYS     = 1      # min days to resolution
 C_MIN_EDGE_PP  = 3.0    # minimum net edge in pp
 C_MIN_BET      = 2.0    # min bet size $
@@ -73,7 +73,12 @@ C_EXCLUDED = [
     'hockey', 'tennis', 'golf', 'formula 1', ' f1 ', 'ufc', 'boxing',
     'wrestling', 'valorant', 'esport', 'dota', 'league of legends',
     'cs2', 'overwatch', 'oscar', 'grammy', 'emmy', 'golden globe',
-    'academy award', 'election', 'vote', 'ballot'
+    'academy award', 'election', 'vote', 'ballot',
+    'end in a draw', 'spread:', 'o/u ', 'over/under',
+    'wimbledon', 'premier league', 'champions league', 'europa league',
+    'la liga', 'serie a', 'bundesliga', 'ligue 1', 'eredivisie',
+    'top chef', 'reality', 'winner?', 'win the 202',
+    'vs.', ' fk ', ' fc ', ' cf ', ' afc ', ' fk'
 ]
 
 # Preferred categories (higher signal quality)
