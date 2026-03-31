@@ -44,7 +44,7 @@ def now_utc_iso():
 C_MIN_PROB     = 87.0   # market must be ≥87% in one direction
 C_MAX_PROB     = 97.0   # cap at 97%
 C_MIN_VOLUME   = 5000   # minimum $5k volume
-C_MAX_DAYS     = 7      # max days to resolution
+C_MAX_DAYS     = 30     # max days to resolution
 C_MIN_DAYS     = 0      # min days (includes today)
 C_MIN_EDGE_PP  = 2.0    # minimum net edge in pp
 C_MIN_BET      = 2.0    # min bet size $
