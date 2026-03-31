@@ -925,30 +925,24 @@ def send_daily_summary():
     except Exception as e:
         print(f'Daily summary error: {e}')
         # ══════════════════════════════════════════════════════════════════════════
-# SCANNER C — MAIN FUNCTION
+# SCANNER C - MAIN FUNCTION
 # ══════════════════════════════════════════════════════════════════════════
 
 def run_high_prob_scan():
-    """
-    """
-    Scanner C v2 - High Probability Volume Strategy.
-
-    Pipeline:
-    1. Fetch 300 markets from Gamma API
-    2. Gate 1: Category exclusions
-    3. Gate 2: Probability 87-97% in one direction
-    4. Gate 3: Volume 5k+
-    5. Gate 4: Resolves within 7 days
-    6. Gate 5: Not already open
-    7. Gate 6: Stability check — seen in previous scan
-    8. Gate 7: Resolution rules fetched and validated from Gamma API
-    9. Gate 8: Claude probability estimation with web search
-    10. Kelly sizing — self-calibrating based on Brier score
-    11. Alert via Telegram
-    """
+    # Scanner C v2 - High Probability Volume Strategy.
+    # 1. Fetch 300 markets from Gamma API
+    # 2. Gate 1: Category exclusions
+    # 3. Gate 2: Probability 87-97% in one direction
+    # 4. Gate 3: Volume min 5000
+    # 5. Gate 4: Resolves within 7 days
+    # 6. Gate 5: Not already open
+    # 7. Gate 6: Stability check
+    # 8. Gate 7: Resolution rules fetched from Gamma API
+    # 9. Gate 8: Claude probability estimation with web search
+    # 10. Kelly sizing self-calibrating based on Brier score
     global _is_running_c
     if _is_running_c:
-        print('Scanner C already running — skipping')
+        print('Scanner C already running - skipping')
         return
     _is_running_c = True
 
