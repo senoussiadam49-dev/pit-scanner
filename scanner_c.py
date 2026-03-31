@@ -1103,6 +1103,14 @@ def run_high_prob_scan():
             log_candidate(condition_id, yes_pct)
 
         print(f'Gate debug: G1(not excluded)={g1_pass} G2(prob 94-96%)={g2_pass} G3(volume)={g3_pass} G4(time)={g4_pass}')
+        # Print the 17 markets that passed Gate 2 so we can see what they are
+        for m in all_markets:
+            yes_pct = m['yes_pct']
+            is_high_yes = C_MIN_PROB <= yes_pct <= C_MAX_PROB
+            is_high_no  = (100 - C_MAX_PROB) <= yes_pct <= (100 - C_MIN_PROB)
+            if (is_high_yes or is_high_no) and not is_excluded(m['question']):
+                direction = 'YES' if is_high_yes else 'NO'
+                print(f'  G2 market: {direction} @ {yes_pct}% | Vol: ${int(m["volume"]):,} | Ends: {m["endDate"]} | {m["question"][:60]}')
         print(f'=== Scanner C complete: {alerts_sent} alerts sent ===')
 
     except Exception as e:
