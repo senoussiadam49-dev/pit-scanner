@@ -461,43 +461,28 @@ MARKET: "{question}"
 CURRENT PRICE: {direction} @ {market_odds}%
 DAYS TO RESOLUTION: {days_left}
 
-RESOLUTION RULES (fetched directly from Polymarket API — use ONLY these rules, do not search for or modify them):
+RESOLUTION RULES (fetched directly from Polymarket API — use ONLY these rules):
 ---
 {rules_text}
 ---
 {warning_instruction}
 
-YOUR TASK:
-1. Do ONE web search: "{question} latest news {days_left} days"
-2. Based on what you find AND the resolution rules above:
-   - Does current reality satisfy the resolution criteria for {direction}?
-   - Has anything changed in the last 48-72 hours that affects this?
-   - Are there any edge cases in the rules that could cause unexpected resolution?
+STEP 1: Do ONE web search: "{question} latest news"
+STEP 2: Based on search results and resolution rules, estimate true probability of {direction}.
+STEP 3: Apply 10pp conservative haircut.
 
-3. Estimate true probability of {direction} resolving correctly.
-
-4. Apply a 10pp conservative haircut to your estimate.
-
-Return EXACTLY this format and nothing else:
-TRUE_P: [number between 0 and 100]
-EDGE: [true_p minus {market_odds} — can be negative]
+CRITICAL — YOUR ENTIRE RESPONSE MUST BE ONLY THESE 7 LINES, NO OTHER TEXT:
+TRUE_P: [number]
+EDGE: [true_p minus {market_odds}]
 METHOD: [base_rate OR decomposition OR resolution_technicality]
-REASON: [one sentence explaining the edge or lack of edge]
-WARNINGS_ADDRESSED: [one sentence addressing the ambiguous language, or 'none']
-RESULT: PASS or FAIL
-FAIL_REASON: [only if FAIL — one sentence why]
+REASON: [one sentence]
+WARNINGS_ADDRESSED: [one sentence or none]
+RESULT: PASS
+FAIL_REASON: [one sentence if FAIL, else none]
 
-RESULT is PASS only if:
-- Edge >= 2pp after haircut
-- No unresolvable ambiguity in rules
-- Web search confirms current reality supports {direction}
-- You are genuinely confident this resolves {direction}
-
-RESULT is FAIL if:
-- Edge < 2pp
-- Rules are ambiguous in a way that could hurt {direction}
-- Web search found something that threatens {direction}
-- You are not confident"""
+RESULT is PASS if edge >= 2pp and you are confident.
+RESULT is FAIL if edge < 2pp or resolution is ambiguous or web search found a threat.
+DO NOT write anything before TRUE_P: or after FAIL_REASON:"""
 
         msg = claude.messages.create(
             model='claude-sonnet-4-20250514',
