@@ -40,56 +40,69 @@ def now_utc_iso():
 
 # ── Scanner C constants ───────────────────────────────────────────────────
 
-# Probability thresholds
-C_MIN_PROB     = 94.0   # market must be ≥94% in one direction
-C_MAX_PROB     = 96.0   # cap at 96% — above this spread is too thin
+# Probability thresholds — wider net, more opportunities
+C_MIN_PROB     = 87.0   # market must be ≥87% in one direction
+C_MAX_PROB     = 97.0   # cap at 97%
 C_MIN_VOLUME   = 5000   # minimum $5k volume
-C_MAX_DAYS     = 30     # max days to resolution
-C_MIN_DAYS     = 1      # min days to resolution
-C_MIN_EDGE_PP  = 3.0    # minimum net edge in pp
+C_MAX_DAYS     = 7      # max days to resolution
+C_MIN_DAYS     = 0      # min days (includes today)
+C_MIN_EDGE_PP  = 2.0    # minimum net edge in pp
 C_MIN_BET      = 2.0    # min bet size $
 C_MAX_BET      = 5.0    # max bet size $ (calibration phase)
 C_CALIB_TRADES = 30     # paper trades needed before real money
 C_BRIER_TARGET = 0.15   # Brier score needed to unlock real bets
 
-# Resolution gate — auto-reject if found in rules
+# Resolution gate — auto-reject if any found in rules text
+# These indicate Polymarket can resolve however they want
 RED_FLAG_WORDS = [
     'polymarket discretion', 'may determine', 'reserves the right',
     'at our discretion', 'polymarket may', 'admin may',
-    'polymarket will decide', 'at the sole discretion', 'subjective'
+    'polymarket will decide', 'at the sole discretion', 'subjective',
+    'may use', 'may consider', 'at polymarket'
 ]
 
-# Warning words — flag to user but don't reject
+# Warning words — these create resolution ambiguity
+# Market flagged as WARN — Claude must explicitly address each one
 WARNING_WORDS = [
     'intercept', 'partial', 'substantially', 'approximately',
     'deemed', 'considered', 'qualify', 'unless', 'except',
-    'provided that', 'subject to'
+    'provided that', 'subject to', 'may not', 'does not include',
+    'excluding', 'regardless'
 ]
 
-# Excluded from Scanner C entirely
+# Hard exclusions — these market types never have clean edges
 C_EXCLUDED = [
-    'exact score', 'highest temperature', 'weather', 'nfl', 'nba',
-    'mlb', 'nhl', 'soccer', 'football', 'basketball', 'baseball',
-    'hockey', 'tennis', 'golf', 'formula 1', ' f1 ', 'ufc', 'boxing',
-    'wrestling', 'valorant', 'esport', 'dota', 'league of legends',
-    'cs2', 'overwatch', 'oscar', 'grammy', 'emmy', 'golden globe',
-    'academy award', 'election', 'vote', 'ballot',
-    'end in a draw', 'spread:', 'o/u ', 'over/under',
+    # Sports outcomes
+    'exact score', 'end in a draw', 'spread:', 'o/u ', 'over/under',
+    'handicap', 'half time', 'first goal', 'clean sheet',
+    'nfl', 'nba', 'mlb', 'nhl', 'ufc', 'boxing', 'wrestling',
+    'basketball', 'baseball', 'hockey', 'golf', 'formula 1', ' f1 ',
+    'valorant', 'esport', 'dota', 'league of legends', 'cs2', 'overwatch',
     'wimbledon', 'premier league', 'champions league', 'europa league',
     'la liga', 'serie a', 'bundesliga', 'ligue 1', 'eredivisie',
-    'top chef', 'reality', 'winner?', 'win the 202',
-    'vs.', ' fk ', ' fc ', ' cf ', ' afc ', ' fk',
-    'republican nominee', 'democratic nominee', 'senate in',
-    'tweets from', 'market cap hit', 'reach $',
-    'win on 2026', 'win the 2025', 'win the 2026'
+    'win on 2026', 'win the 2025', 'win the 2026',
+    ' fk ', ' fc ', ' cf ', ' afc ', ' bc ', ' sc ',
+    # Entertainment
+    'oscar', 'grammy', 'emmy', 'golden globe', 'academy award',
+    'top chef', 'reality show', 'season finale',
+    # Slow political
+    'election', 'vote', 'ballot', 'referendum',
+    'republican nominee', 'democratic nominee',
+    'senate race', 'house race', 'primary',
+    # Crypto price targets (too noisy)
+    'market cap hit', 'reach $', 'hit $',
+    # Weather
+    'highest temperature', 'lowest temperature', 'rainfall',
+    # Social media counts
+    'tweets from', 'posts from', 'followers',
 ]
 
-# Preferred categories (higher signal quality)
-C_PREFERRED = [
+# Categories that get fee-free treatment on Polymarket
+GEO_KEYWORDS = [
     'ceasefire', 'sanctions', 'strait', 'hormuz', 'war', 'conflict',
-    'military', 'diplomatic', 'treaty', 'invasion', 'iran', 'israel',
-    'ukraine', 'russia', 'bitcoin', 'btc', 'ethereum', 'ceo',
-    'merger', 'acquisition', 'fda', 'approval', 'inflation', 'cpi'
+    'military', 'diplomatic', 'treaty', 'invasion', 'attack', 'strike',
+    'iran', 'israel', 'ukraine', 'russia', 'china', 'taiwan', 'houthi',
+    'nato', 'un security', 'peace deal', 'withdrawal', 'troops'
 ]
 
 # ── Scan lock ─────────────────────────────────────────────────────────────
@@ -126,7 +139,7 @@ def is_excluded(question):
 
 def is_preferred(question):
     q = question.lower()
-    return any(kw in q for kw in C_PREFERRED)
+    return any(kw in q for kw in GEO_KEYWORDS)
 
 def days_until(end_date_str):
     try:
@@ -304,211 +317,235 @@ def get_active_markets(limit=300):
         return []
 
 
-# ── Resolution gate ───────────────────────────────────────────────────────
-def fetch_rules(market):
-    """Get resolution rules — already in description field from market fetch."""
-    description = market.get('description', '')
-    if description and len(description) > 50:
-        return description
-    # Fallback fetch by slug
+# ── Resolution rules — fetch, validate, parse ─────────────────────────────
+
+# Rules must contain at least one of these to be considered valid
+RULES_VALIDATORS = [
+    'resolve', 'resolution', 'will resolve',
+    'yes if', 'no if', 'resolves yes', 'resolves no',
+    'criteria', 'determined by', 'based on',
+    'this market', 'market will', 'settle'
+]
+
+def fetch_and_validate_rules(market):
+    """
+    Fetch resolution rules from Gamma API and validate they are real rules.
+    
+    Returns: (rules_text, valid, reason)
+    - rules_text: the actual rules string
+    - valid: True if rules look genuine
+    - reason: why invalid if not valid
+    
+    Three attempts:
+    1. Description field from bulk fetch (already in market object)
+    2. Slug-based fetch (more complete data)
+    3. ConditionId-based fetch (final fallback)
+    """
+    question = market.get('question', '')[:50]
+
+    # Attempt 1 — description already in market object
+    description = market.get('description', '') or ''
+    if _is_valid_rules(description):
+        return description, True, 'ok'
+
+    # Attempt 2 — fetch by slug
     try:
         slug = market.get('slug', '')
-        if not slug:
-            return ''
-        r = session.get(f'{GAMMA_API}/markets', params={'slug': slug}, timeout=10)
-        data = r.json()
-        m = data[0] if isinstance(data, list) and data else {}
-        return m.get('description', '')
-    except:
-        return ''
+        if slug:
+            r = session.get(
+                f'{GAMMA_API}/markets',
+                params={'slug': slug},
+                timeout=10
+            )
+            data = r.json()
+            m = data[0] if isinstance(data, list) and data else {}
+            desc = m.get('description', '') or ''
+            if _is_valid_rules(desc):
+                return desc, True, 'ok'
+    except Exception as e:
+        print(f'  Rules slug fetch error: {e}')
+
+    # Attempt 3 — fetch by conditionId
+    try:
+        condition_id = market.get('conditionId', '')
+        if condition_id:
+            r = session.get(
+                f'{GAMMA_API}/markets',
+                params={'conditionId': condition_id},
+                timeout=10
+            )
+            data = r.json()
+            markets = data if isinstance(data, list) else data.get('markets', [])
+            if markets:
+                desc = markets[0].get('description', '') or ''
+                if _is_valid_rules(desc):
+                    return desc, True, 'ok'
+    except Exception as e:
+        print(f'  Rules conditionId fetch error: {e}')
+
+    # All attempts failed
+    if description and len(description) > 50:
+        # Has text but doesn't look like rules
+        return description, False, f'Text found but no resolution language detected: "{description[:80]}"'
+
+    return '', False, 'No resolution rules found after 3 fetch attempts'
+
+
+def _is_valid_rules(text):
+    """
+    Check if text actually contains resolution rules.
+    Must be >100 chars AND contain at least one resolution keyword.
+    """
+    if not text or len(text) < 100:
+        return False
+    text_lower = text.lower()
+    return any(v in text_lower for v in RULES_VALIDATORS)
+
 
 def parse_rules(rules_text):
     """
     Parse resolution rules for red flags and warnings.
+    
+    RED FLAGS → automatic REJECT (Polymarket has discretion)
+    WARNINGS → flag to Claude, must explicitly address each one
+    
     Returns: ('CLEAN'|'WARN'|'REJECT', list_of_flags)
     """
-    if not rules_text or len(rules_text) < 20:
-        return 'WARN', ['No resolution rules found — verify manually']
+    if not rules_text:
+        return 'REJECT', ['Empty rules text']
 
     text = rules_text.lower()
 
+    # Check red flags first — any red flag = automatic reject
     red_flags = [w for w in RED_FLAG_WORDS if w in text]
     if red_flags:
         return 'REJECT', red_flags
 
+    # Check warning words — these need Claude to explicitly address them
     warnings = [w for w in WARNING_WORDS if w in text]
-    if len(warnings) >= 2:
+
+    # More than 3 warnings = too ambiguous even for Claude
+    if len(warnings) >= 3:
+        return 'REJECT', warnings
+
+    if warnings:
         return 'WARN', warnings
 
-    return 'CLEAN', warnings
+    return 'CLEAN', []
 
 
-# ── Web verification (one search per candidate) ───────────────────────────
-def verify_candidate(question, direction, rules_text, days_left):
+# ── Claude probability estimation ─────────────────────────────────────────
+def estimate_probability(question, direction, rules_text, yes_pct, days_left, warnings):
     """
-    One targeted Claude web search per candidate that passed all gates.
+    Claude reads the actual resolution rules (fetched from Gamma API)
+    and does one web search to estimate true probability.
 
-    Only question: has anything happened in last 48h that could flip
-    a {direction} position from near-certain to uncertain?
+    Claude cannot hallucinate rules — they are provided directly.
+    Claude must explicitly address any warning words found in rules.
 
-    Returns: (verified: bool, reason: str)
+    Returns: (true_p_pct, edge_pp, pass_fail, reason)
     """
     try:
-        flip_direction = 'NO' if direction == 'YES' else 'YES'
+        market_odds = yes_pct if direction == 'YES' else round(100 - yes_pct, 1)
+        warning_instruction = ''
+        if warnings:
+            warning_instruction = f'''
+IMPORTANT — The resolution rules contain ambiguous language: {warnings}
+You MUST explicitly address each of these in your analysis.
+Explain whether they help or hurt the {direction} position.
+If any creates genuine resolution risk — return FAIL.'''
 
-        prompt = f"""You are verifying a high-probability prediction market position.
+        prompt = f"""You are evaluating a Polymarket prediction market position.
 
 MARKET: "{question}"
-CURRENT POSITION: {direction} — market is at {"94-96%" if direction == "YES" else "4-6% YES (94-96% NO)"}
+CURRENT PRICE: {direction} @ {market_odds}%
 DAYS TO RESOLUTION: {days_left}
-RESOLUTION RULES: {rules_text[:500] if rules_text else "Not available"}
 
-TASK — do ONE focused web search:
-Search: "{question} latest news"
+RESOLUTION RULES (fetched directly from Polymarket API — use ONLY these rules, do not search for or modify them):
+---
+{rules_text}
+---
+{warning_instruction}
 
-Answer ONLY these questions based on what you find:
-1. Has anything happened in the last 48-72 hours that could cause this market to flip toward {flip_direction}?
-2. Do the resolution rules contain any clause that the current situation might NOT satisfy?
-3. Is there any breaking development that the 94%+ market price has NOT yet processed?
+YOUR TASK:
+1. Do ONE web search: "{question} latest news {days_left} days"
+2. Based on what you find AND the resolution rules above:
+   - Does current reality satisfy the resolution criteria for {direction}?
+   - Has anything changed in the last 48-72 hours that affects this?
+   - Are there any edge cases in the rules that could cause unexpected resolution?
 
-If YES to any → respond: FAIL | [one sentence reason]
-If NO to all → respond: PASS | [one sentence confirming nothing has changed]
+3. Estimate true probability of {direction} resolving correctly.
 
-Respond in exactly this format:
+4. Apply a 10pp conservative haircut to your estimate.
+
+Return EXACTLY this format and nothing else:
+TRUE_P: [number between 0 and 100]
+EDGE: [true_p minus {market_odds} — can be negative]
+METHOD: [base_rate OR decomposition OR resolution_technicality]
+REASON: [one sentence explaining the edge or lack of edge]
+WARNINGS_ADDRESSED: [one sentence addressing the ambiguous language, or 'none']
 RESULT: PASS or FAIL
-REASON: one sentence"""
+FAIL_REASON: [only if FAIL — one sentence why]
+
+RESULT is PASS only if:
+- Edge >= 2pp after haircut
+- No unresolvable ambiguity in rules
+- Web search confirms current reality supports {direction}
+- You are genuinely confident this resolves {direction}
+
+RESULT is FAIL if:
+- Edge < 2pp
+- Rules are ambiguous in a way that could hurt {direction}
+- Web search found something that threatens {direction}
+- You are not confident"""
 
         msg = claude.messages.create(
             model='claude-sonnet-4-20250514',
-            max_tokens=200,
+            max_tokens=400,
             tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
             messages=[{'role': 'user', 'content': prompt}]
         )
 
+        # Extract text from response
         response = ''
         for block in msg.content:
             if hasattr(block, 'type') and block.type == 'text':
                 response += block.text
 
-        result_match = re.search(r'RESULT:\s*(PASS|FAIL)', response, re.IGNORECASE)
-        reason_match = re.search(r'REASON:\s*(.+)', response)
+        # Parse structured response
+        true_p_match  = re.search(r'TRUE_P:\s*(\d+\.?\d*)', response)
+        edge_match    = re.search(r'EDGE:\s*(-?\d+\.?\d*)', response)
+        result_match  = re.search(r'RESULT:\s*(PASS|FAIL)', response, re.IGNORECASE)
+        reason_match  = re.search(r'REASON:\s*(.+?)(?=\n|WARNINGS|RESULT|$)', response)
+        fail_match    = re.search(r'FAIL_REASON:\s*(.+?)(?=\n|$)', response)
 
-        # If format not found, default to PASS with warning rather than blocking
-        if not result_match:
-            print(f'Scanner C verify: FORMAT ERROR — defaulting to PASS — response: {response[:100]}')
-            return True, 'Unverified (format error) — check manually before confirming'
+        # If format not parseable — skip this market, log for debugging
+        if not true_p_match or not result_match:
+            print(f'  Claude format error — response: {response[:150]}')
+            return None, None, 'SKIP', 'Could not parse Claude response'
 
-        result = result_match.group(1).upper()
-        reason = reason_match.group(1).strip() if reason_match else 'No reason given'
+        true_p    = float(true_p_match.group(1))
+        edge      = float(edge_match.group(1)) if edge_match else round(true_p - market_odds, 1)
+        result    = result_match.group(1).upper()
+        reason    = reason_match.group(1).strip() if reason_match else 'No reason given'
+        fail_reason = fail_match.group(1).strip() if fail_match else ''
 
-        verified = result == 'PASS'
-        print(f'Scanner C verify: {result} — {reason[:80]}')
-        return verified, reason
+        print(f'  Claude: TRUE_P={true_p}% EDGE={edge}pp RESULT={result} — {reason[:80]}')
+
+        if result == 'FAIL':
+            return true_p, edge, 'FAIL', fail_reason or reason
+
+        return true_p, edge, 'PASS', reason
 
     except Exception as e:
-        print(f'Verification error: {e}')
-        # On error — don't block the trade, flag it as unverified
-        return True, f'Unverified (search failed) — check manually before confirming'
+        print(f'  Claude estimation error: {e}')
+        # On error — skip this market rather than blindly approving
+        return None, None, 'SKIP', f'Error: {str(e)[:50]}'
   # ══════════════════════════════════════════════════════════════════════════
 # MATH ENGINE — pure Python, no AI
 # ══════════════════════════════════════════════════════════════════════════
 
-def calculate_true_probability(yes_pct, gate_result, volume, days_left):
-    """
-    Self-calibrating true probability estimate.
 
-    Adjustments start conservative and scale based on scanner's
-    historical Brier score. If scanner has been accurate, adjustments
-    grow. If scanner has been wrong, adjustments shrink.
-
-    This means the system automatically becomes more aggressive
-    as it proves itself, and more conservative when it makes mistakes.
-    """
-    if yes_pct >= C_MIN_PROB:
-        direction = 'YES'
-        q = yes_pct / 100.0
-    else:
-        direction = 'NO'
-        q = 1.0 - (yes_pct / 100.0)
-
-    base = q
-
-    # ── CALIBRATION SCALAR ─────────────────────────────────────────
-    # Scales how much we trust our adjustments based on track record
-    # Brier 0.25 (random)    → scalar = 0.2 (ultra conservative)
-    # Brier 0.20 (poor)      → scalar = 0.4
-    # Brier 0.15 (target)    → scalar = 0.8
-    # Brier 0.10 (good)      → scalar = 1.0
-    # Brier 0.05 (excellent) → scalar = 1.2
-    cal = get_calibration()
-    brier = float(cal.get('brier_score') or 0.25)
-    trades_done = int(cal.get('trades_resolved') or 0)
-
-    if trades_done < 10:
-        scalar = 0.2
-    elif trades_done < 20:
-        scalar = 0.4
-    elif trades_done < C_CALIB_TRADES:
-        scalar = max(0.3, min(1.0, (0.25 - brier) / 0.15))
-    else:
-        scalar = max(0.5, min(1.3, (0.25 - brier) / 0.10))
-
-    # ── ADJUSTMENTS (scaled by calibration scalar) ──────────────────
-    adj = 0.0
-
-    # 1. Price stability — market held 94%+ for 2 consecutive scans
-    adj += 0.020 * scalar
-
-    # 2. Resolution criteria clarity
-    if gate_result == 'CLEAN':
-        adj += 0.012 * scalar
-    elif gate_result == 'WARN':
-        adj -= 0.010  # penalty for ambiguity — always applied, not scaled
-
-    # 3. Volume — more participants = more validation
-    if volume >= 500000:
-        adj += 0.012 * scalar
-    elif volume >= 200000:
-        adj += 0.008 * scalar
-    elif volume >= 100000:
-        adj += 0.004 * scalar
-
-    # 4. Time decay — closer to resolution = less uncertainty
-    if days_left <= 1:
-        adj += 0.018 * scalar
-    elif days_left <= 3:
-        adj += 0.012 * scalar
-    elif days_left <= 7:
-        adj += 0.006 * scalar
-
-    # ── SAFETY CAPS ─────────────────────────────────────────────────
-    true_p = base + adj
-    true_p = min(true_p, 0.98)       # never claim certainty
-    true_p = max(true_p, q + 0.001)  # always at least slightly above market
-
-    return direction, q, true_p
-
-
-def calculate_edge(true_p, q, days_left, fee_pp):
-    """
-    Net edge and annual yield calculation.
-
-    gross_edge = true_p - q  (raw probability advantage)
-    net_edge   = gross_edge - fee  (after platform fees)
-    annual_yield = (net_edge / q) / days * 365 * 100
-    """
-    gross_edge_pp = round((true_p - q) * 100, 2)
-    net_edge_pp   = round(gross_edge_pp - fee_pp, 2)
-
-    if days_left <= 0:
-        days_left = 1
-
-    # Return on capital deployed, annualised
-    annual_yield = round(
-        ((true_p - q) / q) / days_left * 365 * 100, 1
-    )
-
-    return gross_edge_pp, net_edge_pp, annual_yield
 
 
 def calculate_kelly(true_p, q, bankroll):
@@ -893,18 +930,21 @@ def send_daily_summary():
 
 def run_high_prob_scan():
     """
-    Scanner C — High Probability Volume Strategy.
-    Pure Python math engine. Zero AI during scanning.
+    """
+    Scanner C v2 — High Probability Volume Strategy.
 
     Pipeline:
-    1. Fetch all markets
-    2. Filter: probability 94-96%, volume $50k+, 1-14 days
-    3. Stability check: seen in previous scan?
-    4. Resolution gate: parse rules for red flags
-    5. Calculate true probability (conservative adjustments)
-    6. Calculate net edge + annual yield
-    7. Kelly position sizing
-    8. Alert via Telegram
+    1. Fetch 300 markets from Gamma API
+    2. Gate 1: Category exclusions
+    3. Gate 2: Probability 87-97% in one direction
+    4. Gate 3: Volume $5k+
+    5. Gate 4: Resolves within 7 days
+    6. Gate 5: Not already open
+    7. Gate 6: Stability check — seen in previous scan
+    8. Gate 7: Resolution rules fetched and validated from Gamma API
+    9. Gate 8: Claude probability estimation with web search
+    10. Kelly sizing — self-calibrating based on Brier score
+    11. Alert via Telegram
     """
     global _is_running_c
     if _is_running_c:
@@ -989,70 +1029,82 @@ def run_high_prob_scan():
                 continue
 
             # ── GATE 7: Resolution rules ───────────────────────────────
-            rules_text   = fetch_rules(m)
+            # Fetch actual rules from Gamma API — three attempts
+            rules_text, rules_valid, rules_reason = fetch_and_validate_rules(m)
+
+            if not rules_valid:
+                print(f'Scanner C: NO VALID RULES — {rules_reason[:60]} — {question[:50]}')
+                continue
+
+            # Parse rules for red flags and warnings
             gate_result, flags = parse_rules(rules_text)
 
             if gate_result == 'REJECT':
                 print(f'Scanner C: REJECTED — red flags {flags} — {question[:50]}')
                 continue
 
-            # ── GATE 8: Web verification ───────────────────────────────
-            # One targeted search — has anything flipped in 48h?
-            # Only runs after all 7 prior gates pass
-            verified, verify_reason = verify_candidate(
-                question, direction_check, rules_text, days_left
+            # ── GATE 8: Claude probability estimation ──────────────────
+            # Claude receives actual rules text — cannot hallucinate them
+            # Does one web search for current reality
+            # Returns structured probability estimate
+            direction = 'YES' if is_high_yes else 'NO'
+            true_p_pct, edge_pp, result, reason = estimate_probability(
+                question, direction, rules_text, yes_pct, days_left, flags
             )
-            if not verified:
-                print(f'Scanner C: FAILED verification — {verify_reason} — {question[:50]}')
+
+            if result == 'SKIP':
+                print(f'Scanner C: SKIP (estimation error) — {reason[:60]} — {question[:50]}')
                 continue
 
-            # ── MATH: True probability ─────────────────────────────────
-            direction, q_cost, true_p = calculate_true_probability(
-                yes_pct, gate_result, volume, days_left
-            )
+            if result == 'FAIL':
+                print(f'Scanner C: FAIL — {reason[:60]} — {question[:50]}')
+                continue
 
-            # ── MATH: Edge and yield ───────────────────────────────────
-            category, fee_pp         = classify_category(question)
-            gross_edge_pp, net_edge_pp, annual_yield = calculate_edge(
-                true_p, q_cost, days_left, fee_pp
-            )
+            if edge_pp < C_MIN_EDGE_PP:
+                print(f'Scanner C: Edge too small ({edge_pp}pp) — {question[:50]}')
+                continue
+
+            # ── MATH: Kelly sizing (pure Python) ───────────────────────
+            market_odds = round(yes_pct if direction == 'YES' else 100 - yes_pct, 1)
+            q_cost = market_odds / 100.0
+            category, fee_pp = classify_category(question)
+            net_edge_pp = round(edge_pp - fee_pp, 2)
 
             if net_edge_pp < C_MIN_EDGE_PP:
-                print(f'Scanner C: Edge too small ({net_edge_pp}pp) — {question[:50]}')
+                print(f'Scanner C: Net edge too small after fees ({net_edge_pp}pp) — {question[:50]}')
                 continue
 
-            # ── MATH: Kelly sizing ─────────────────────────────────────
-            kelly_stake = calculate_kelly(true_p, q_cost, bankroll)
+            kelly_stake = calculate_kelly(true_p_pct / 100.0, q_cost, bankroll)
             if kelly_stake <= 0:
                 print(f'Scanner C: No Kelly edge — {question[:50]}')
                 continue
 
-            # ── BUILD SIGNAL ───────────────────────────────────────────
-            market_odds = round(yes_pct if direction == 'YES' else 100 - yes_pct, 1)
-            true_p_pct  = round(true_p * 100, 1)
+            # Annual yield
+            if days_left <= 0:
+                days_left = 1
+            annual_yield = round(((true_p_pct/100 - q_cost) / q_cost) / days_left * 365 * 100, 1)
 
+            # ── BUILD SIGNAL ───────────────────────────────────────────
             signal = {
                 'question':           question,
                 'conditionId':        condition_id,
                 'direction':          direction,
-                'verifyReason':       verify_reason,
+                'verifyReason':       reason,
                 'marketOdds':         market_odds,
                 'trueP':              true_p_pct,
                 'edgePp':             net_edge_pp,
-                'grossEdgePp':        gross_edge_pp,
                 'annualYield':        annual_yield,
                 'daysLeft':           days_left,
                 'kellyStake':         kelly_stake,
                 'resolutionRisk':     1 if gate_result == 'CLEAN' else 2,
                 'resolutionDate':     end_date_str,
-                'resolutionCriteria': rules_text[:400] if rules_text else 'See Polymarket',
+                'resolutionCriteria': rules_text[:500] if rules_text else 'See Polymarket',
                 'warnings':           flags if gate_result == 'WARN' else [],
                 'category':           category,
                 'thesis': (
                     f'{direction} @ {market_odds}% | True P: {true_p_pct}% | '
                     f'Edge: {net_edge_pp}pp | Yield: {annual_yield}%/yr | '
-                    f'{days_left}d to resolution | Vol: ${int(volume):,} | '
-                    f'Rules: {gate_result}'
+                    f'{days_left}d | Vol: ${int(volume):,} | {reason}'
                 ),
             }
 
@@ -1082,9 +1134,9 @@ def run_high_prob_scan():
                 f'*Resolves:* {end_date_str} ({days_left}d)\n'
                 f'*Category:* {category} | *Vol:* ${int(volume):,}\n'
                 f'*Kelly Stake:* ${kelly_stake}\n\n'
-                f'✓ *Verified:* _{verify_reason[:150]}_\n\n'
+                f'🧠 *Claude analysis:* _{reason[:200]}_\n\n'
                 f'📋 *Resolution rules:*\n'
-                f'_{rules_text[:300] if rules_text else "Not found — check Polymarket"}_\n'
+                f'_{rules_text[:400] if rules_text else "Not found — check Polymarket"}_\n'
                 f'{warnings_str}\n'
                 f'🔗 {market_url}\n\n'
                 f'_{calibration_summary_line(cal)}_\n\n'
@@ -1116,15 +1168,7 @@ def run_high_prob_scan():
         for condition_id, yes_pct in candidates_this_scan:
             log_candidate(condition_id, yes_pct)
 
-        print(f'Gate debug: G1(not excluded)={g1_pass} G2(prob 94-96%)={g2_pass} G3(volume)={g3_pass} G4(time)={g4_pass}')
-        # Print the 17 markets that passed Gate 2 so we can see what they are
-        for m in all_markets:
-            yes_pct = m['yes_pct']
-            is_high_yes = C_MIN_PROB <= yes_pct <= C_MAX_PROB
-            is_high_no  = (100 - C_MAX_PROB) <= yes_pct <= (100 - C_MIN_PROB)
-            if (is_high_yes or is_high_no) and not is_excluded(m['question']):
-                direction = 'YES' if is_high_yes else 'NO'
-                print(f'  G2 market: {direction} @ {yes_pct}% | Vol: ${int(m["volume"]):,} | Ends: {m["endDate"]} | {m["question"][:60]}')
+        print(f'Gate debug: G1={g1_pass} G2(87-97%)={g2_pass} G3(volume)={g3_pass} G4(time)={g4_pass}')
         print(f'=== Scanner C complete: {alerts_sent} alerts sent ===')
 
     except Exception as e:
@@ -1145,13 +1189,13 @@ if __name__ == '__main__':
     print(f'Calibration status: {calibration_summary_line(cal)}')
 
     send_telegram(
-        '🟢 *PIT Scanner C v1 started*\n\n'
+        '🟢 *PIT Scanner C v2 started*\n\n'
         '📐 _High Probability Volume Strategy_\n\n'
-        '✓ Pure math engine — zero AI during scanning\n'
-        '✓ Resolution gate — rules parsed before every bet\n'
+        '✓ 87-97% probability range\n'
+        '✓ Resolution rules fetched from Gamma API\n'
         '✓ Stability check — 2 consecutive scans required\n'
-        '✓ Quarter Kelly sizing — $2-5 per trade\n'
-        '✓ Brier score tracking — self-calibrating\n'
+        '✓ Claude probability estimation with web search\n'
+        '✓ Self-calibrating Kelly sizing\n'
         '✓ Auto-resolve — lessons extracted on every close\n\n'
         f'_{calibration_summary_line(cal)}_\n\n'
         'Scanning every 30 min 24/7'
