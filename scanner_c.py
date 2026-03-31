@@ -931,7 +931,7 @@ def send_daily_summary():
 def run_high_prob_scan():
     """
     """
-    Scanner C v2 — High Probability Volume Strategy.
+    Scanner C v2 - High Probability Volume Strategy.
 
     Pipeline:
     1. Fetch 300 markets from Gamma API
