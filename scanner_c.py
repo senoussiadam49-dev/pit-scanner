@@ -399,7 +399,8 @@ REASON: one sentence"""
 
     except Exception as e:
         print(f'Verification error: {e}')
-        return False, f'Verification failed: {str(e)[:50]}'
+        # On error — don't block the trade, flag it as unverified
+        return True, f'Unverified (search failed) — check manually before confirming'
   # ══════════════════════════════════════════════════════════════════════════
 # MATH ENGINE — pure Python, no AI
 # ══════════════════════════════════════════════════════════════════════════
