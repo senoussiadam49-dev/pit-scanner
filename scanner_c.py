@@ -915,6 +915,8 @@ def run_high_prob_scan():
         candidates_this_scan = []
         alerts_sent = 0
 
+        g1_pass = g2_pass = g3_pass = g4_pass = 0
+
         for m in all_markets:
             question     = m['question']
             yes_pct      = m['yes_pct']
@@ -925,19 +927,20 @@ def run_high_prob_scan():
             # ── GATE 1: Excluded categories ───────────────────────────
             if is_excluded(question):
                 continue
+            g1_pass += 1
 
             # ── GATE 2: Probability range ──────────────────────────────
-            # YES bet: market at 94-96% YES
-            # NO bet:  market at 4-6% YES (meaning NO is 94-96%)
             is_high_yes = C_MIN_PROB <= yes_pct <= C_MAX_PROB
             is_high_no  = (100 - C_MAX_PROB) <= yes_pct <= (100 - C_MIN_PROB)
 
             if not is_high_yes and not is_high_no:
                 continue
+            g2_pass += 1
 
             # ── GATE 3: Volume ─────────────────────────────────────────
             if volume < C_MIN_VOLUME:
                 continue
+            g3_pass += 1
 
             # ── GATE 4: Time window ────────────────────────────────────
             if not end_date_str:
@@ -948,6 +951,7 @@ def run_high_prob_scan():
                 continue
             if end_date < tomorrow or end_date > cutoff:
                 continue
+            g4_pass += 1
 
             days_left = (end_date - today).days
             if days_left < C_MIN_DAYS:
@@ -1098,6 +1102,7 @@ def run_high_prob_scan():
         for condition_id, yes_pct in candidates_this_scan:
             log_candidate(condition_id, yes_pct)
 
+        print(f'Gate debug: G1(not excluded)={g1_pass} G2(prob 94-96%)={g2_pass} G3(volume)={g3_pass} G4(time)={g4_pass}')
         print(f'=== Scanner C complete: {alerts_sent} alerts sent ===')
 
     except Exception as e:
